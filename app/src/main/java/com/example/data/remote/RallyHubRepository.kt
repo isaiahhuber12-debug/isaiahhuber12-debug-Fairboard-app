@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import android.content.Context
 import com.example.R
+import com.example.data.model.ApprovalStatus
 import com.example.data.model.ChannelAccessLevel
 import com.example.data.model.ChatChannel
 import com.example.data.model.ChatMessage
@@ -27,6 +28,7 @@ import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -232,20 +234,42 @@ class RallyHubRepository(
             MemberRole.ORGANIZER -> listOf("ALL", "PARTICIPANT", "ORGANIZER")
             MemberRole.PARTICIPANT -> listOf("ALL", "PARTICIPANT")
         }
-        emitAll(
-            db.collection("groups").document(groupId).collection("notifications")
-                .whereIn("targetRole", allowedRoles)
+        val roleFeed = db.collection("groups").document(groupId).collection("notifications")
+            .whereIn("targetRole", allowedRoles)
+            .snapshots()
+            .map { snap ->
+                snap.toObjects(
+                    HubNotification::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                )
+            }
+            .catch { error ->
+                rethrowOrLog(error, OperationType.LIST, path, uid)
+            }
+
+        if (role.canAccessAdminPanel) {
+            emitAll(roleFeed.map { it.sortedByDescending { n -> n.createdAt?.seconds ?: 0L } })
+        } else {
+            val ownSubmissions = db.collection("groups").document(groupId).collection("notifications")
+                .whereEqualTo("senderId", uid)
                 .snapshots()
                 .map { snap ->
                     snap.toObjects(
                         HubNotification::class.java,
                         DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-                    ).sortedByDescending { it.createdAt?.seconds ?: 0L }
+                    )
                 }
                 .catch { error ->
                     rethrowOrLog(error, OperationType.LIST, path, uid)
                 }
-        )
+            emitAll(
+                combine(roleFeed, ownSubmissions) { visible, own ->
+                    (visible + own)
+                        .distinctBy { it.id }
+                        .sortedByDescending { it.createdAt?.seconds ?: 0L }
+                }
+            )
+        }
     }
 
     suspend fun createGroupWithCode(
@@ -408,6 +432,89 @@ class RallyHubRepository(
         }
     }
 
+    suspend fun updateGroupDetails(
+        groupId: String,
+        name: String,
+        description: String,
+        currentCode: String
+    ): Result<Unit> {
+        val path = "groups/$groupId"
+        return try {
+            val uid = requireUserId()
+            val trimmedName = name.trim()
+            require(trimmedName.length in 2..80) { "Group name must be 2–80 characters." }
+            val trimmedDesc = description.trim().take(500)
+
+            val batch = db.batch()
+            batch.update(
+                db.collection("groups").document(groupId),
+                mapOf(
+                    "name" to trimmedName,
+                    "description" to trimmedDesc,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            if (currentCode.isNotBlank()) {
+                batch.update(
+                    db.collection("groupCodes").document(currentCode),
+                    mapOf(
+                        "groupName" to trimmedName,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+            batch.update(
+                db.collection("users").document(uid).collection("joinedGroups").document(groupId),
+                mapOf(
+                    "groupName" to trimmedName,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateOwnDisplayName(
+        groupId: String,
+        newDisplayName: String
+    ): Result<Unit> {
+        val uid = auth.currentUser?.uid
+            ?: return Result.failure(IllegalStateException("Google Sign-In required"))
+        val path = "groups/$groupId/members/$uid"
+        return try {
+            val clean = newDisplayName.trim()
+            require(clean.length in 1..60) { "Display name must be 1–60 characters." }
+            val batch = db.batch()
+            batch.update(
+                db.document(path),
+                mapOf(
+                    "displayName" to clean,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.update(
+                db.collection("users").document(uid),
+                mapOf(
+                    "displayName" to clean,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+            batch.commit().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     suspend fun joinGroupByCode(rawCode: String, displayNameOverride: String? = null): Result<String> {
         val code = normalizeGroupCode(rawCode)
         return try {
@@ -536,6 +643,45 @@ class RallyHubRepository(
         }
     }
 
+    suspend fun updateEvent(
+        groupId: String,
+        eventId: String,
+        title: String,
+        description: String,
+        location: String,
+        category: String,
+        startEpochMs: Long,
+        endEpochMs: Long,
+        organizerName: String
+    ): Result<Unit> {
+        val path = "groups/$groupId/events/$eventId"
+        return try {
+            requireUserId()
+            require(title.trim().length in 2..100) { "Event title must be 2–100 characters." }
+            require(location.trim().length in 1..160) { "Location is required." }
+            require(endEpochMs >= startEpochMs) { "End time must be after start time." }
+
+            db.document(path).update(
+                mapOf(
+                    "title" to title.trim(),
+                    "description" to description.trim().take(1000),
+                    "location" to location.trim(),
+                    "category" to category.trim().ifBlank { "General" }.take(40),
+                    "startEpochMs" to startEpochMs,
+                    "endEpochMs" to endEpochMs,
+                    "organizerName" to organizerName.trim().ifBlank { "Organizer" }.take(60),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     suspend fun createTask(
         groupId: String,
         eventId: String,
@@ -574,6 +720,49 @@ class RallyHubRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateTask(
+        groupId: String,
+        eventId: String,
+        taskId: String,
+        title: String,
+        description: String,
+        deadlineEpochMs: Long,
+        capacity: Long,
+        assignedCount: Long,
+        status: TaskStatus,
+        chatChannelId: String? = null
+    ): Result<Unit> {
+        val path = "groups/$groupId/events/$eventId/tasks/$taskId"
+        return try {
+            requireUserId()
+            require(title.trim().length in 2..100) { "Task title must be 2–100 characters." }
+            require(capacity in maxOf(1L, assignedCount)..50L) {
+                "Capacity must be between ${maxOf(1L, assignedCount)} and 50."
+            }
+            val effectiveStatus = when {
+                status == TaskStatus.COMPLETED -> TaskStatus.COMPLETED
+                assignedCount >= capacity -> TaskStatus.FILLED
+                else -> TaskStatus.OPEN
+            }
+            val payload = mapOf(
+                "title" to title.trim(),
+                "description" to description.trim().take(600),
+                "deadlineEpochMs" to deadlineEpochMs,
+                "capacity" to capacity,
+                "status" to effectiveStatus.name,
+                "chatChannelId" to chatChannelId?.takeIf { it.isNotBlank() },
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            db.document(path).update(payload).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
             Result.failure(e)
         }
     }
@@ -699,6 +888,34 @@ class RallyHubRepository(
         }
     }
 
+    suspend fun updateChannel(
+        groupId: String,
+        channelId: String,
+        name: String,
+        description: String,
+        accessLevel: ChannelAccessLevel
+    ): Result<Unit> {
+        val path = "groups/$groupId/channels/$channelId"
+        return try {
+            requireUserId()
+            require(name.trim().length in 2..60) { "Channel name must be 2–60 characters." }
+            db.document(path).update(
+                mapOf(
+                    "name" to name.trim(),
+                    "description" to description.trim().take(300),
+                    "accessLevel" to accessLevel.name,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     suspend fun sendMessage(
         groupId: String,
         channelId: String,
@@ -772,7 +989,8 @@ class RallyHubRepository(
         targetChannelName: String? = null,
         targetEventId: String? = null,
         senderName: String,
-        scheduledForEpochMs: Long? = null
+        scheduledForEpochMs: Long? = null,
+        approvalStatus: ApprovalStatus = ApprovalStatus.APPROVED
     ): Result<String> {
         val notifId = "ntf_${UUID.randomUUID().toString().replace("-", "").take(16)}"
         val path = "groups/$groupId/notifications/$notifId"
@@ -793,6 +1011,7 @@ class RallyHubRepository(
                 "senderId" to uid,
                 "senderName" to senderName.take(60),
                 "scheduledForEpochMs" to scheduledForEpochMs,
+                "approvalStatus" to approvalStatus.name,
                 "createdAt" to FieldValue.serverTimestamp()
             ).filterValues { it != null }
 
@@ -802,6 +1021,150 @@ class RallyHubRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun approveNotification(
+        groupId: String,
+        notificationId: String
+    ): Result<Unit> {
+        val path = "groups/$groupId/notifications/$notificationId"
+        return try {
+            requireUserId()
+            db.document(path).update(
+                mapOf(
+                    "approvalStatus" to ApprovalStatus.APPROVED.name,
+                    "targetScope" to "ALL",
+                    "targetRole" to "ALL",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateMessage(
+        groupId: String,
+        channelId: String,
+        messageId: String,
+        newText: String
+    ): Result<Unit> {
+        val msgPath = "groups/$groupId/channels/$channelId/messages/$messageId"
+        return try {
+            requireUserId()
+            val trimmed = newText.trim()
+            require(trimmed.length in 1..2000) { "Message must be 1–2000 characters." }
+            db.document(msgPath).update(
+                mapOf(
+                    "text" to trimmed,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, msgPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteMessage(
+        groupId: String,
+        channelId: String,
+        messageId: String
+    ): Result<Unit> {
+        val msgPath = "groups/$groupId/channels/$channelId/messages/$messageId"
+        return try {
+            requireUserId()
+            require(messageId.isNotBlank()) { "Message ID required" }
+            val channelRef = db.collection("groups").document(groupId)
+                .collection("channels").document(channelId)
+            val msgRef = channelRef.collection("messages").document(messageId)
+            msgRef.delete().await()
+            try {
+                val chSnap = channelRef.get().await()
+                val cur = chSnap.getLong("messageCount") ?: 0L
+                if (cur > 0L) {
+                    channelRef.update(
+                        mapOf(
+                            "messageCount" to cur - 1L,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            } catch (_: Exception) {
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, msgPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateNotification(
+        groupId: String,
+        notificationId: String,
+        title: String,
+        body: String,
+        notificationType: NotificationType,
+        targetScope: String,
+        targetRole: String,
+        targetChannelId: String? = null,
+        targetChannelName: String? = null,
+        targetEventId: String? = null,
+        scheduledForEpochMs: Long? = null
+    ): Result<Unit> {
+        val path = "groups/$groupId/notifications/$notificationId"
+        return try {
+            requireUserId()
+            require(title.trim().length in 2..100) { "Notification title must be 2–100 characters." }
+            require(body.trim().length in 2..600) { "Notification body must be 2–600 characters." }
+
+            val payload = mapOf(
+                "title" to title.trim(),
+                "body" to body.trim(),
+                "notificationType" to notificationType.name,
+                "targetScope" to targetScope,
+                "targetRole" to targetRole,
+                "targetChannelId" to targetChannelId?.takeIf { it.isNotBlank() },
+                "targetChannelName" to targetChannelName?.takeIf { it.isNotBlank() },
+                "targetEventId" to targetEventId?.takeIf { it.isNotBlank() },
+                "scheduledForEpochMs" to scheduledForEpochMs,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            db.document(path).update(payload).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteNotification(
+        groupId: String,
+        notificationId: String
+    ): Result<Unit> {
+        val path = "groups/$groupId/notifications/$notificationId"
+        return try {
+            requireUserId()
+            require(notificationId.isNotBlank()) { "Notification ID required" }
+            db.document(path).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, path)
             Result.failure(e)
         }
     }

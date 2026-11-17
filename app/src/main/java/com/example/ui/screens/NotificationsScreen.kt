@@ -25,16 +25,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.Campaign
-import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.TaskAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -42,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,12 +57,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.data.model.ApprovalStatus
 import com.example.data.model.ChatChannel
 import com.example.data.model.HubNotification
+import com.example.data.model.MemberRole
 import com.example.data.model.NotificationType
 import com.example.data.model.RallyEvent
 import com.example.notifications.RallyNotificationHelper
+import com.example.ui.components.DateTimePickerField
 import com.example.ui.components.RallyDateFormat
+import com.example.ui.theme.AmberContainer
+import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CoralSecondary
 import com.example.ui.theme.EmeraldTertiary
 import com.example.ui.viewmodel.RallyWorkspaceActions
@@ -84,23 +95,27 @@ fun NotificationsScreen(
 
     var filterType by remember { mutableStateOf<NotificationType?>(null) }
     var showComposerDialog by remember { mutableStateOf(false) }
+    var editingNotification by remember { mutableStateOf<HubNotification?>(null) }
+    var deletingNotification by remember { mutableStateOf<HubNotification?>(null) }
 
-    val filtered = remember(notifications, filterType) {
-        if (filterType == null) notifications
-        else notifications.filter { it.parsedType() == filterType }
+    val isAdminOrCreator = uiState.currentRole.canAccessAdminPanel
+    val pendingNotifications = remember(notifications) {
+        notifications.filter { it.parsedApprovalStatus() == ApprovalStatus.PENDING }
+    }
+    val approvedNotifications = remember(notifications, filterType) {
+        val approved = notifications.filter { it.parsedApprovalStatus() == ApprovalStatus.APPROVED }
+        if (filterType == null) approved else approved.filter { it.parsedType() == filterType }
     }
 
     Scaffold(
         floatingActionButton = {
-            if (uiState.currentRole.canSendTargetedUpdates) {
-                FloatingActionButton(
-                    onClick = { showComposerDialog = true },
-                    containerColor = CoralSecondary,
-                    contentColor = androidx.compose.ui.graphics.Color.White,
-                    modifier = Modifier.testTag("compose_notification_fab")
-                ) {
-                    Icon(Icons.Rounded.Send, contentDescription = "Send Targeted Alert")
-                }
+            FloatingActionButton(
+                onClick = { showComposerDialog = true },
+                containerColor = CoralSecondary,
+                contentColor = androidx.compose.ui.graphics.Color.White,
+                modifier = Modifier.testTag("compose_notification_fab")
+            ) {
+                Icon(Icons.Rounded.Send, contentDescription = "Send Alert or Submit Announcement")
             }
         },
         modifier = modifier
@@ -122,7 +137,11 @@ fun NotificationsScreen(
                     Column {
                         Text("Alerts & Reminders", style = MaterialTheme.typography.headlineSmall)
                         Text(
-                            text = "Real-time announcements, group task updates, and deadline alerts.",
+                            text = if (isAdminOrCreator) {
+                                "Broadcast announcements, approve member announcements, and manage group alerts."
+                            } else {
+                                "View group alerts or submit an announcement to everyone (Admin approval required)."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -167,13 +186,39 @@ fun NotificationsScreen(
                     }
                 }
 
+                // Pending Admin Approval Section
+                if (pendingNotifications.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = if (isAdminOrCreator) "Pending Admin Approval (${pendingNotifications.size})"
+                            else "Your Submissions Awaiting Admin Approval (${pendingNotifications.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = AmberWarning
+                        )
+                    }
+                    items(pendingNotifications, key = { "pending_${it.id}" }) { item ->
+                        val canEditItem = isAdminOrCreator ||
+                            (item.senderId == uiState.currentUserId && item.parsedApprovalStatus() == ApprovalStatus.PENDING)
+                        NotificationItemCard(
+                            notification = item,
+                            canApprove = isAdminOrCreator,
+                            canEdit = canEditItem,
+                            canDelete = isAdminOrCreator,
+                            onApprove = { actions.approveNotification(item.id) },
+                            onEdit = { editingNotification = item },
+                            onDelete = { deletingNotification = item }
+                        )
+                    }
+                }
+
                 item {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         item {
                             FilterChip(
                                 selected = filterType == null,
                                 onClick = { filterType = null },
-                                label = { Text("All (${notifications.size})") }
+                                label = { Text("All (${approvedNotifications.size})") }
                             )
                         }
                         items(NotificationType.entries) { type ->
@@ -186,7 +231,7 @@ fun NotificationsScreen(
                     }
                 }
 
-                if (filtered.isEmpty()) {
+                if (approvedNotifications.isEmpty()) {
                     item {
                         Surface(
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -202,8 +247,18 @@ fun NotificationsScreen(
                         }
                     }
                 } else {
-                    items(filtered, key = { it.id }) { item ->
-                        NotificationItemCard(item)
+                    items(approvedNotifications, key = { it.id }) { item ->
+                        val canEditItem = isAdminOrCreator ||
+                            (uiState.currentRole.canSendTargetedUpdates && item.parsedType() != NotificationType.ANNOUNCEMENT)
+                        NotificationItemCard(
+                            notification = item,
+                            canApprove = false,
+                            canEdit = canEditItem,
+                            canDelete = isAdminOrCreator,
+                            onApprove = {},
+                            onEdit = { editingNotification = item },
+                            onDelete = { deletingNotification = item }
+                        )
                     }
                 }
             }
@@ -212,11 +267,12 @@ fun NotificationsScreen(
 
     if (showComposerDialog) {
         NotificationComposerDialog(
-            canSendGlobalAnnouncement = uiState.currentRole.canSendGlobalAnnouncements,
+            currentRole = uiState.currentRole,
+            initialNotification = null,
             channels = channels,
             events = events,
             onDismiss = { showComposerDialog = false },
-            onSend = { title, body, type, targetScope, targetRole, channelId, channelName, eventId ->
+            onSend = { title, body, type, targetScope, targetRole, channelId, channelName, eventId, scheduledMs ->
                 actions.sendNotification(
                     title = title,
                     body = body,
@@ -225,35 +281,99 @@ fun NotificationsScreen(
                     targetRole = targetRole,
                     targetChannelId = channelId,
                     targetChannelName = channelName,
-                    targetEventId = eventId
+                    targetEventId = eventId,
+                    scheduledForEpochMs = scheduledMs
                 )
                 showComposerDialog = false
+            }
+        )
+    }
+
+    editingNotification?.let { target ->
+        NotificationComposerDialog(
+            currentRole = uiState.currentRole,
+            initialNotification = target,
+            channels = channels,
+            events = events,
+            onDismiss = { editingNotification = null },
+            onSend = { title, body, type, targetScope, targetRole, channelId, channelName, eventId, scheduledMs ->
+                actions.updateNotification(
+                    notificationId = target.id,
+                    title = title,
+                    body = body,
+                    type = type,
+                    targetScope = targetScope,
+                    targetRole = targetRole,
+                    targetChannelId = channelId,
+                    targetChannelName = channelName,
+                    targetEventId = eventId,
+                    scheduledForEpochMs = scheduledMs
+                )
+                editingNotification = null
+            }
+        )
+    }
+
+    deletingNotification?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deletingNotification = null },
+            title = { Text("Delete Announcement / Alert") },
+            text = { Text("Delete \"${target.title}\"? This will remove it for all group members.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        actions.deleteNotification(target.id)
+                        deletingNotification = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.testTag("confirm_delete_notification_button")
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingNotification = null }) { Text("Cancel") }
             }
         )
     }
 }
 
 @Composable
-private fun NotificationItemCard(notification: HubNotification) {
+private fun NotificationItemCard(
+    notification: HubNotification,
+    canApprove: Boolean,
+    canEdit: Boolean,
+    canDelete: Boolean,
+    onApprove: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
     val type = notification.parsedType()
-    val (icon, accent) = when (type) {
-        NotificationType.ANNOUNCEMENT -> Icons.Rounded.Campaign to CoralSecondary
-        NotificationType.TASK_UPDATE -> Icons.Rounded.TaskAlt to EmeraldTertiary
-        NotificationType.DEADLINE_REMINDER -> Icons.Rounded.Alarm to MaterialTheme.colorScheme.primary
+    val isPending = notification.parsedApprovalStatus() == ApprovalStatus.PENDING
+    val (icon, accent) = when {
+        isPending -> Icons.Rounded.HourglassTop to AmberWarning
+        type == NotificationType.ANNOUNCEMENT -> Icons.Rounded.Campaign to CoralSecondary
+        type == NotificationType.TASK_UPDATE -> Icons.Rounded.TaskAlt to EmeraldTertiary
+        else -> Icons.Rounded.Alarm to MaterialTheme.colorScheme.primary
     }
     val timeMs = notification.createdAt?.toDate()?.time ?: System.currentTimeMillis()
-    val targetLabel = when (notification.targetScope) {
-        "CHANNEL" -> "#${notification.targetChannelName ?: "Team"}"
-        "ROLE" -> "${notification.targetRole}S"
+    val targetLabel = when {
+        isPending -> "Pending Admin Approval"
+        notification.targetScope == "CHANNEL" -> "#${notification.targetChannelName ?: "Team"}"
+        notification.targetScope == "ROLE" -> "${notification.targetRole}S"
         else -> "All Members"
     }
 
     Surface(
-        color = MaterialTheme.colorScheme.surface,
+        color = if (isPending) AmberContainer.copy(alpha = 0.35f) else MaterialTheme.colorScheme.surface,
         shape = MaterialTheme.shapes.medium,
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
+            if (isPending) AmberWarning.copy(alpha = 0.7f)
+            else MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -278,7 +398,7 @@ private fun NotificationItemCard(notification: HubNotification) {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        color = if (isPending) AmberContainer else MaterialTheme.colorScheme.surfaceVariant,
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
@@ -302,11 +422,67 @@ private fun NotificationItemCard(notification: HubNotification) {
                     text = notification.body,
                     style = MaterialTheme.typography.bodyMedium
                 )
-                Text(
-                    text = "Sent by ${notification.senderName}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                notification.scheduledForEpochMs?.let { scheduledMs ->
+                    Text(
+                        text = "Scheduled: ${RallyDateFormat.formatDateTime(scheduledMs)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = buildString {
+                            append("Sent by ${notification.senderName}")
+                            if (notification.updatedAt != null) append(" • Edited")
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (canEdit) {
+                            IconButton(
+                                onClick = onEdit,
+                                modifier = Modifier.testTag("edit_notification_${notification.id}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Edit,
+                                    contentDescription = "Edit alert",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        if (canDelete) {
+                            IconButton(
+                                onClick = onDelete,
+                                modifier = Modifier.testTag("delete_notification_${notification.id}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteOutline,
+                                    contentDescription = "Delete alert",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                }
+                if (canApprove) {
+                    Spacer(Modifier.height(4.dp))
+                    Button(
+                        onClick = onApprove,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("approve_notification_${notification.id}")
+                    ) {
+                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Approve & Post to Everyone")
+                    }
+                }
             }
         }
     }
@@ -314,7 +490,8 @@ private fun NotificationItemCard(notification: HubNotification) {
 
 @Composable
 fun NotificationComposerDialog(
-    canSendGlobalAnnouncement: Boolean,
+    currentRole: MemberRole,
+    initialNotification: HubNotification? = null,
     channels: List<ChatChannel>,
     events: List<RallyEvent>,
     onDismiss: () -> Unit,
@@ -326,43 +503,99 @@ fun NotificationComposerDialog(
         targetRole: String,
         channelId: String?,
         channelName: String?,
-        eventId: String?
+        eventId: String?,
+        scheduledForEpochMs: Long?
     ) -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var body by remember { mutableStateOf("") }
-    var selectedType by remember {
+    val isAdminOrCreator = currentRole.canAccessAdminPanel
+    val availableTypes = when {
+        isAdminOrCreator -> NotificationType.entries
+        currentRole.canSendTargetedUpdates -> listOf(
+            NotificationType.TASK_UPDATE,
+            NotificationType.DEADLINE_REMINDER,
+            NotificationType.ANNOUNCEMENT
+        )
+        else -> listOf(NotificationType.ANNOUNCEMENT)
+    }
+
+    var title by remember(initialNotification?.id) { mutableStateOf(initialNotification?.title.orEmpty()) }
+    var body by remember(initialNotification?.id) { mutableStateOf(initialNotification?.body.orEmpty()) }
+    var selectedType by remember(initialNotification?.id) {
         mutableStateOf(
-            if (canSendGlobalAnnouncement) NotificationType.ANNOUNCEMENT else NotificationType.TASK_UPDATE
+            initialNotification?.parsedType()
+                ?: availableTypes.first()
         )
     }
-    var targetRole by remember { mutableStateOf("ALL") }
-    var selectedChannel by remember { mutableStateOf(channels.firstOrNull()) }
-    var selectedEvent by remember { mutableStateOf(events.firstOrNull()) }
+    var targetRole by remember(initialNotification?.id) {
+        mutableStateOf(
+            initialNotification?.targetRole?.takeIf { it != "ADMIN" || initialNotification.parsedApprovalStatus() == ApprovalStatus.APPROVED }
+                ?: "ALL"
+        )
+    }
+    var selectedChannel by remember(initialNotification?.id) {
+        mutableStateOf(
+            channels.firstOrNull { it.id == initialNotification?.targetChannelId } ?: channels.firstOrNull()
+        )
+    }
+    var selectedEvent by remember(initialNotification?.id) {
+        mutableStateOf(
+            events.firstOrNull { it.id == initialNotification?.targetEventId } ?: events.firstOrNull()
+        )
+    }
+    var includeSchedule by remember(initialNotification?.id) {
+        mutableStateOf(initialNotification?.scheduledForEpochMs != null)
+    }
+    var scheduledEpochMs by remember(initialNotification?.id) {
+        mutableLongStateOf(initialNotification?.scheduledForEpochMs ?: (System.currentTimeMillis() + 3_600_000L))
+    }
 
-    val availableTypes = if (canSendGlobalAnnouncement) NotificationType.entries
-    else listOf(NotificationType.TASK_UPDATE, NotificationType.DEADLINE_REMINDER)
+    val willRequireApproval = selectedType == NotificationType.ANNOUNCEMENT && !isAdminOrCreator
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Targeted Alert Dispatcher") },
+        title = {
+            Text(
+                when {
+                    initialNotification != null -> "Edit Announcement / Alert"
+                    willRequireApproval -> "Submit Announcement for Approval"
+                    else -> "Targeted Alert Dispatcher"
+                }
+            )
+        },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.verticalScroll(rememberScrollState())
             ) {
-                Text("Notification Type", style = MaterialTheme.typography.labelLarge)
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    availableTypes.forEach { t ->
-                        FilterChip(
-                            selected = selectedType == t,
-                            onClick = { selectedType = t },
-                            label = { Text(t.label) }
-                        )
+                if (availableTypes.size > 1 && initialNotification == null) {
+                    Text("Notification Type", style = MaterialTheme.typography.labelLarge)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        availableTypes.forEach { t ->
+                            val label = if (t == NotificationType.ANNOUNCEMENT && !isAdminOrCreator) {
+                                "${t.label} (Needs Admin Approval)"
+                            } else t.label
+                            FilterChip(
+                                selected = selectedType == t,
+                                onClick = { selectedType = t },
+                                label = { Text(label) }
+                            )
+                        }
                     }
                 }
 
-                if (selectedType == NotificationType.TASK_UPDATE && channels.isNotEmpty()) {
+                if (willRequireApproval) {
+                    Surface(
+                        color = AmberContainer,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "This announcement will be sent to Admins first and posted to everyone once approved.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                } else if (selectedType == NotificationType.TASK_UPDATE && channels.isNotEmpty()) {
                     Text("Target Group Chat", style = MaterialTheme.typography.labelLarge)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(channels, key = { it.id }) { ch ->
@@ -384,7 +617,7 @@ fun NotificationComposerDialog(
                             )
                         }
                     }
-                } else if (selectedType == NotificationType.ANNOUNCEMENT) {
+                } else if (selectedType == NotificationType.ANNOUNCEMENT && isAdminOrCreator) {
                     Text("Audience Scope", style = MaterialTheme.typography.labelLarge)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf("ALL" to "All Users", "ORGANIZER" to "Organizers+", "ADMIN" to "Admins").forEach { (r, label) ->
@@ -411,24 +644,47 @@ fun NotificationComposerDialog(
                     maxLines = 4,
                     modifier = Modifier.fillMaxWidth().testTag("notif_body_input")
                 )
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Checkbox(
+                        checked = includeSchedule,
+                        onCheckedChange = { includeSchedule = it },
+                        modifier = Modifier.testTag("notif_schedule_checkbox")
+                    )
+                    Text("Attach / Edit Target Date & Time", style = MaterialTheme.typography.bodyMedium)
+                }
+
+                if (includeSchedule) {
+                    DateTimePickerField(
+                        label = "Scheduled Date & Time",
+                        epochMs = scheduledEpochMs,
+                        onDateTimeSelected = { scheduledEpochMs = it },
+                        testTagPrefix = "notif_schedule"
+                    )
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    val scope = when (selectedType) {
-                        NotificationType.TASK_UPDATE -> if (selectedChannel != null) "CHANNEL" else "ALL"
-                        NotificationType.ANNOUNCEMENT -> if (targetRole == "ALL") "ALL" else "ROLE"
-                        NotificationType.DEADLINE_REMINDER -> "ALL"
+                    val scope = when {
+                        willRequireApproval -> "ALL"
+                        selectedType == NotificationType.TASK_UPDATE -> if (selectedChannel != null) "CHANNEL" else "ALL"
+                        selectedType == NotificationType.ANNOUNCEMENT -> if (targetRole == "ALL") "ALL" else "ROLE"
+                        else -> "ALL"
                     }
-                    val resolvedRole = when (selectedType) {
-                        NotificationType.TASK_UPDATE -> when (selectedChannel?.accessLevel) {
+                    val resolvedRole = when {
+                        willRequireApproval -> "ADMIN"
+                        selectedType == NotificationType.TASK_UPDATE -> when (selectedChannel?.accessLevel) {
                             "ADMIN" -> "ADMIN"
                             "ORGANIZER" -> "ORGANIZER"
                             else -> "ALL"
                         }
-                        NotificationType.ANNOUNCEMENT -> targetRole
-                        NotificationType.DEADLINE_REMINDER -> "ALL"
+                        selectedType == NotificationType.ANNOUNCEMENT -> targetRole
+                        else -> "ALL"
                     }
                     onSend(
                         title,
@@ -438,13 +694,20 @@ fun NotificationComposerDialog(
                         resolvedRole,
                         if (selectedType == NotificationType.TASK_UPDATE) selectedChannel?.id else null,
                         if (selectedType == NotificationType.TASK_UPDATE) selectedChannel?.name else null,
-                        if (selectedType == NotificationType.DEADLINE_REMINDER) selectedEvent?.id else null
+                        if (selectedType == NotificationType.DEADLINE_REMINDER) selectedEvent?.id else null,
+                        if (includeSchedule) scheduledEpochMs else null
                     )
                 },
                 enabled = title.trim().length >= 2 && body.trim().length >= 2,
                 modifier = Modifier.testTag("confirm_send_notif_button")
             ) {
-                Text("Send Alert")
+                Text(
+                    when {
+                        initialNotification != null -> "Save Changes"
+                        willRequireApproval -> "Submit for Approval"
+                        else -> "Send Alert"
+                    }
+                )
             }
         },
         dismissButton = {

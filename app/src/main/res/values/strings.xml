@@ -16,4 +16,6 @@
     <string name="notif_channel_announcements">Event Announcements</string>
     <string name="notif_channel_tasks">Task &amp; Group Updates</string>
     <string name="notif_channel_reminders">Deadlines &amp; Event Reminders</string>
+    <string name="ai_coordinator_title">Gemini AI Coordinator</string>
+    <string name="ai_coordinator_subtitle">Live schedule briefings, shift planning &amp; announcement drafts</string>
 </resources>

@@ -2,7 +2,6 @@ package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
@@ -68,13 +69,24 @@ import androidx.compose.ui.unit.dp
 import com.example.data.model.ChatChannel
 import com.example.data.model.EventTask
 import com.example.data.model.RallyEvent
+import com.example.data.model.TaskStatus
+import com.example.ui.components.DateTimePickerField
 import com.example.ui.components.RallyDateFormat
+import com.example.ui.components.ReminderEditorDialog
 import com.example.ui.theme.CoralSecondary
 import com.example.ui.theme.EmeraldTertiary
 import com.example.ui.viewmodel.RallyWorkspaceActions
 import com.example.ui.viewmodel.RallyWorkspaceUiState
 import com.example.ui.viewmodel.UiState
 import java.util.Calendar
+
+private data class CalendarReminderTarget(
+    val itemId: String,
+    val title: String,
+    val notifTitle: String,
+    val notifBody: String,
+    val targetEpochMs: Long
+)
 
 @Composable
 fun CalendarScreen(
@@ -87,7 +99,10 @@ fun CalendarScreen(
     val channels = (uiState.channelsState as? UiState.Success)?.data.orEmpty()
 
     var showCreateEventDialog by remember { mutableStateOf(false) }
+    var editingEvent by remember { mutableStateOf<RallyEvent?>(null) }
     var showCreateTaskForEventId by remember { mutableStateOf<String?>(null) }
+    var editingTask by remember { mutableStateOf<EventTask?>(null) }
+    var reminderTarget by remember { mutableStateOf<CalendarReminderTarget?>(null) }
 
     if (selectedEvent != null) {
         BackHandler { actions.selectEvent(null) }
@@ -101,37 +116,97 @@ fun CalendarScreen(
             uiState = uiState,
             actions = actions,
             onBack = { actions.selectEvent(null) },
+            onEditEvent = { editingEvent = selectedEvent },
             onAddTask = { showCreateTaskForEventId = selectedEvent.id },
+            onEditTask = { task -> editingTask = task },
+            onOpenReminderEditor = { target -> reminderTarget = target },
             modifier = modifier
         )
     } else {
         CalendarOverviewView(
             events = events,
             uiState = uiState,
-            actions = actions,
             onOpenCreateEvent = { showCreateEventDialog = true },
+            onEditEvent = { event -> editingEvent = event },
+            onOpenReminderEditor = { target -> reminderTarget = target },
             onSelectEvent = { actions.selectEvent(it) },
             modifier = modifier
         )
     }
 
     if (showCreateEventDialog) {
-        CreateEventDialog(
+        EventEditorDialog(
+            initialEvent = null,
             onDismiss = { showCreateEventDialog = false },
-            onCreate = { title, desc, loc, cat, startMs, endMs ->
+            onSave = { title, desc, loc, cat, startMs, endMs ->
                 actions.createEvent(title, desc, loc, cat, startMs, endMs)
                 showCreateEventDialog = false
             }
         )
     }
 
+    editingEvent?.let { targetEvent ->
+        EventEditorDialog(
+            initialEvent = targetEvent,
+            onDismiss = { editingEvent = null },
+            onSave = { title, desc, loc, cat, startMs, endMs ->
+                actions.updateEvent(targetEvent.id, title, desc, loc, cat, startMs, endMs)
+                editingEvent = null
+            }
+        )
+    }
+
     showCreateTaskForEventId?.let { targetEventId ->
-        CreateTaskDialog(
+        TaskEditorDialog(
+            initialTask = null,
             channels = channels,
             onDismiss = { showCreateTaskForEventId = null },
-            onCreate = { title, desc, deadlineMs, capacity, channelId ->
+            onSave = { title, desc, deadlineMs, capacity, _, channelId ->
                 actions.createTask(targetEventId, title, desc, deadlineMs, capacity, channelId)
                 showCreateTaskForEventId = null
+            }
+        )
+    }
+
+    editingTask?.let { targetTask ->
+        TaskEditorDialog(
+            initialTask = targetTask,
+            channels = channels,
+            onDismiss = { editingTask = null },
+            onSave = { title, desc, deadlineMs, capacity, status, channelId ->
+                actions.updateTask(
+                    eventId = targetTask.eventId,
+                    taskId = targetTask.id,
+                    title = title,
+                    description = desc,
+                    deadlineEpochMs = deadlineMs,
+                    capacity = capacity,
+                    status = status,
+                    chatChannelId = channelId
+                )
+                editingTask = null
+            }
+        )
+    }
+
+    reminderTarget?.let { target ->
+        ReminderEditorDialog(
+            itemTitle = target.title,
+            targetEpochMs = target.targetEpochMs,
+            currentReminderEpochMs = uiState.remindedTimes[target.itemId],
+            onDismiss = { reminderTarget = null },
+            onSave = { triggerMs ->
+                actions.scheduleOrUpdateReminder(
+                    itemId = target.itemId,
+                    title = target.notifTitle,
+                    body = target.notifBody,
+                    triggerAtEpochMs = triggerMs
+                )
+                reminderTarget = null
+            },
+            onRemove = {
+                actions.removeReminder(target.itemId)
+                reminderTarget = null
             }
         )
     }
@@ -141,8 +216,9 @@ fun CalendarScreen(
 private fun CalendarOverviewView(
     events: List<RallyEvent>,
     uiState: RallyWorkspaceUiState,
-    actions: RallyWorkspaceActions,
     onOpenCreateEvent: () -> Unit,
+    onEditEvent: (RallyEvent) -> Unit,
+    onOpenReminderEditor: (CalendarReminderTarget) -> Unit,
     onSelectEvent: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -344,6 +420,7 @@ private fun CalendarOverviewView(
                 } else {
                     items(filteredEvents, key = { it.id }) { event ->
                         val eventTasks = uiState.allTasksByEvent[event.id].orEmpty()
+                        val reminderTimeMs = uiState.remindedTimes[event.id]
                         val isReminded = event.id in uiState.remindedItemIds
                         Surface(
                             color = MaterialTheme.colorScheme.surface,
@@ -377,21 +454,39 @@ private fun CalendarOverviewView(
                                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                         )
                                     }
-                                    IconButton(
-                                        onClick = {
-                                            actions.toggleReminder(
-                                                itemId = event.id,
-                                                title = "Event Starting: ${event.title}",
-                                                body = "${event.location} at ${RallyDateFormat.formatTime(event.startEpochMs)}",
-                                                triggerAtEpochMs = event.startEpochMs - 15 * 60_000L
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (uiState.currentRole.canManageEventsAndTasks) {
+                                            IconButton(
+                                                onClick = { onEditEvent(event) },
+                                                modifier = Modifier.testTag("edit_event_${event.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Edit,
+                                                    contentDescription = "Edit event",
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                onOpenReminderEditor(
+                                                    CalendarReminderTarget(
+                                                        itemId = event.id,
+                                                        title = event.title,
+                                                        notifTitle = "Event Starting: ${event.title}",
+                                                        notifBody = "${event.location} at ${RallyDateFormat.formatTime(event.startEpochMs)}",
+                                                        targetEpochMs = event.startEpochMs
+                                                    )
+                                                )
+                                            },
+                                            modifier = Modifier.testTag("calendar_remind_event_${event.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isReminded) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
+                                                contentDescription = "Configure event reminder",
+                                                tint = if (isReminded) CoralSecondary else MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
-                                    ) {
-                                        Icon(
-                                            imageVector = if (isReminded) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
-                                            contentDescription = "Set event reminder",
-                                            tint = if (isReminded) CoralSecondary else MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
                                     }
                                 }
                                 Text(
@@ -413,7 +508,7 @@ private fun CalendarOverviewView(
                                         Icon(Icons.Rounded.Schedule, contentDescription = null, modifier = Modifier.size(15.dp))
                                         Spacer(Modifier.width(4.dp))
                                         Text(
-                                            text = RallyDateFormat.formatDateTime(event.startEpochMs),
+                                            text = "${RallyDateFormat.formatDateTime(event.startEpochMs)} – ${RallyDateFormat.formatTime(event.endEpochMs)}",
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
@@ -425,6 +520,13 @@ private fun CalendarOverviewView(
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
+                                }
+                                if (reminderTimeMs != null) {
+                                    Text(
+                                        text = "Reminder: ${RallyDateFormat.formatDateTime(reminderTimeMs)}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CoralSecondary
+                                    )
                                 }
                                 Text(
                                     text = if (eventTasks.isEmpty()) "Tap to view details & tasks"
@@ -449,9 +551,13 @@ private fun EventDetailView(
     uiState: RallyWorkspaceUiState,
     actions: RallyWorkspaceActions,
     onBack: () -> Unit,
+    onEditEvent: () -> Unit,
     onAddTask: () -> Unit,
+    onEditTask: (EventTask) -> Unit,
+    onOpenReminderEditor: (CalendarReminderTarget) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val eventReminderMs = uiState.remindedTimes[event.id]
     val isReminded = event.id in uiState.remindedItemIds
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -479,23 +585,40 @@ private fun EventDetailView(
                         }
                         Text("Event & Tasks", style = MaterialTheme.typography.titleLarge)
                     }
-                    OutlinedButton(
-                        onClick = {
-                            actions.toggleReminder(
-                                itemId = event.id,
-                                title = "Event Starting: ${event.title}",
-                                body = "${event.location} at ${RallyDateFormat.formatTime(event.startEpochMs)}",
-                                triggerAtEpochMs = event.startEpochMs - 15 * 60_000L
-                            )
-                        }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(
-                            imageVector = if (isReminded) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(if (isReminded) "Reminded" else "Remind Me")
+                        if (uiState.currentRole.canManageEventsAndTasks) {
+                            IconButton(
+                                onClick = onEditEvent,
+                                modifier = Modifier.testTag("detail_edit_event_button")
+                            ) {
+                                Icon(Icons.Rounded.Edit, contentDescription = "Edit event details")
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                onOpenReminderEditor(
+                                    CalendarReminderTarget(
+                                        itemId = event.id,
+                                        title = event.title,
+                                        notifTitle = "Event Starting: ${event.title}",
+                                        notifBody = "${event.location} at ${RallyDateFormat.formatTime(event.startEpochMs)}",
+                                        targetEpochMs = event.startEpochMs
+                                    )
+                                )
+                            },
+                            modifier = Modifier.testTag("detail_remind_event_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isReminded) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (isReminded) "Edit Reminder" else "Remind Me")
+                        }
                     }
                 }
             }
@@ -525,6 +648,13 @@ private fun EventDetailView(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (eventReminderMs != null) {
+                            Text(
+                                text = "Reminder set for ${RallyDateFormat.formatDateTime(eventReminderMs)}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CoralSecondary
+                            )
+                        }
                         if (event.description.isNotBlank()) {
                             Text(event.description, style = MaterialTheme.typography.bodyMedium)
                         }
@@ -575,6 +705,7 @@ private fun EventDetailView(
                     val claimed = uiState.currentUserId in task.assignedUids
                     val isFull = task.assignedCount >= task.capacity
                     val taskReminded = task.id in uiState.remindedItemIds
+                    val taskReminderMs = uiState.remindedTimes[task.id]
                     val progress = if (task.capacity <= 0L) 0f
                     else (task.assignedCount.toFloat() / task.capacity.toFloat()).coerceIn(0f, 1f)
 
@@ -603,22 +734,47 @@ private fun EventDetailView(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = CoralSecondary
                                     )
-                                }
-                                IconButton(
-                                    onClick = {
-                                        actions.toggleReminder(
-                                            itemId = task.id,
-                                            title = "Task Deadline: ${task.title}",
-                                            body = "Shift deadline for ${event.title}",
-                                            triggerAtEpochMs = task.deadlineEpochMs - 30 * 60_000L
+                                    if (taskReminderMs != null) {
+                                        Text(
+                                            text = "Reminder: ${RallyDateFormat.formatDateTime(taskReminderMs)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
                                         )
                                     }
-                                ) {
-                                    Icon(
-                                        imageVector = if (taskReminded) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
-                                        contentDescription = "Task deadline reminder",
-                                        tint = if (taskReminded) CoralSecondary else MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (uiState.currentRole.canManageEventsAndTasks) {
+                                        IconButton(
+                                            onClick = { onEditTask(task) },
+                                            modifier = Modifier.testTag("edit_task_${task.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Edit,
+                                                contentDescription = "Edit task",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            onOpenReminderEditor(
+                                                CalendarReminderTarget(
+                                                    itemId = task.id,
+                                                    title = task.title,
+                                                    notifTitle = "Task Deadline: ${task.title}",
+                                                    notifBody = "Shift deadline for ${event.title}",
+                                                    targetEpochMs = task.deadlineEpochMs
+                                                )
+                                            )
+                                        },
+                                        modifier = Modifier.testTag("remind_task_${task.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = if (taskReminded) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
+                                            contentDescription = "Configure task deadline reminder",
+                                            tint = if (taskReminded) CoralSecondary else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
 
@@ -640,7 +796,7 @@ private fun EventDetailView(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = "${task.assignedCount}/${task.capacity} slots filled",
+                                    text = "${task.assignedCount}/${task.capacity} slots filled • ${task.parsedStatus().label}",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -689,20 +845,28 @@ private fun EventDetailView(
 }
 
 @Composable
-private fun CreateEventDialog(
+private fun EventEditorDialog(
+    initialEvent: RallyEvent?,
     onDismiss: () -> Unit,
-    onCreate: (String, String, String, String, Long, Long) -> Unit
+    onSave: (String, String, String, String, Long, Long) -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
-    var location by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf("Main Event") }
-    var daysFromNow by remember { mutableIntStateOf(1) }
-    var durationHours by remember { mutableIntStateOf(2) }
+    val defaultStart = remember(initialEvent?.id) {
+        initialEvent?.startEpochMs ?: (System.currentTimeMillis() + 26 * 3_600_000L)
+    }
+    val defaultEnd = remember(initialEvent?.id) {
+        initialEvent?.endEpochMs ?: (defaultStart + 2 * 3_600_000L)
+    }
+
+    var title by remember(initialEvent?.id) { mutableStateOf(initialEvent?.title.orEmpty()) }
+    var description by remember(initialEvent?.id) { mutableStateOf(initialEvent?.description.orEmpty()) }
+    var location by remember(initialEvent?.id) { mutableStateOf(initialEvent?.location.orEmpty()) }
+    var category by remember(initialEvent?.id) { mutableStateOf(initialEvent?.category ?: "Main Event") }
+    var startEpochMs by remember(initialEvent?.id) { mutableLongStateOf(defaultStart) }
+    var endEpochMs by remember(initialEvent?.id) { mutableLongStateOf(defaultEnd) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Create Calendar Event") },
+        title = { Text(if (initialEvent == null) "Create Calendar Event" else "Edit Event & Schedule") },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -736,38 +900,34 @@ private fun CreateEventDialog(
                     maxLines = 3,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Text("Schedule Offset", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(0 to "Today", 1 to "+1 Day", 3 to "+3 Days", 7 to "+7 Days").forEach { (d, label) ->
-                        FilterChip(
-                            selected = daysFromNow == d,
-                            onClick = { daysFromNow = d },
-                            label = { Text(label) }
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(1, 2, 4).forEach { hrs ->
-                        FilterChip(
-                            selected = durationHours == hrs,
-                            onClick = { durationHours = hrs },
-                            label = { Text("${hrs}h") }
-                        )
-                    }
-                }
+                DateTimePickerField(
+                    label = "Start Date & Time",
+                    epochMs = startEpochMs,
+                    onDateTimeSelected = { newStart ->
+                        startEpochMs = newStart
+                        if (endEpochMs <= newStart) {
+                            endEpochMs = newStart + 2 * 3_600_000L
+                        }
+                    },
+                    testTagPrefix = "event_start"
+                )
+                DateTimePickerField(
+                    label = "End Date & Time",
+                    epochMs = endEpochMs,
+                    onDateTimeSelected = { newEnd ->
+                        endEpochMs = if (newEnd > startEpochMs) newEnd else startEpochMs + 3_600_000L
+                    },
+                    testTagPrefix = "event_end"
+                )
             }
         },
         confirmButton = {
             Button(
-                onClick = {
-                    val startMs = System.currentTimeMillis() + (daysFromNow * 24L + 2L) * 3_600_000L
-                    val endMs = startMs + durationHours * 3_600_000L
-                    onCreate(title, description, location, category, startMs, endMs)
-                },
-                enabled = title.trim().length >= 2 && location.trim().isNotEmpty(),
+                onClick = { onSave(title, description, location, category, startEpochMs, endEpochMs) },
+                enabled = title.trim().length >= 2 && location.trim().isNotEmpty() && endEpochMs > startEpochMs,
                 modifier = Modifier.testTag("confirm_create_event_button")
             ) {
-                Text("Publish Event")
+                Text(if (initialEvent == null) "Publish Event" else "Save Changes")
             }
         },
         dismissButton = {
@@ -777,20 +937,29 @@ private fun CreateEventDialog(
 }
 
 @Composable
-private fun CreateTaskDialog(
+private fun TaskEditorDialog(
+    initialTask: EventTask?,
     channels: List<ChatChannel>,
     onDismiss: () -> Unit,
-    onCreate: (String, String, Long, Long, String?) -> Unit
+    onSave: (String, String, Long, Long, TaskStatus, String?) -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
-    var capacityText by remember { mutableStateOf("5") }
-    var deadlineHours by remember { mutableLongStateOf(12L) }
-    var selectedChannelId by remember { mutableStateOf(channels.firstOrNull()?.id) }
+    var title by remember(initialTask?.id) { mutableStateOf(initialTask?.title.orEmpty()) }
+    var description by remember(initialTask?.id) { mutableStateOf(initialTask?.description.orEmpty()) }
+    val minCap = maxOf(1L, initialTask?.assignedCount ?: 1L)
+    var capacityText by remember(initialTask?.id) { mutableStateOf((initialTask?.capacity ?: 5L).toString()) }
+    var deadlineEpochMs by remember(initialTask?.id) {
+        mutableLongStateOf(initialTask?.deadlineEpochMs ?: (System.currentTimeMillis() + 12 * 3_600_000L))
+    }
+    var selectedStatus by remember(initialTask?.id) {
+        mutableStateOf(initialTask?.parsedStatus() ?: TaskStatus.OPEN)
+    }
+    var selectedChannelId by remember(initialTask?.id) {
+        mutableStateOf(initialTask?.chatChannelId ?: channels.firstOrNull()?.id)
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add Event Task") },
+        title = { Text(if (initialTask == null) "Add Event Task" else "Edit Task & Deadline") },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -813,24 +982,32 @@ private fun CreateTaskDialog(
                 OutlinedTextField(
                     value = capacityText,
                     onValueChange = { capacityText = it.filter { ch -> ch.isDigit() }.take(2) },
-                    label = { Text("Volunteer Capacity (1–50)") },
+                    label = { Text("Volunteer Capacity (${minCap}–50)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("task_capacity_input")
                 )
-                Text("Deadline Window", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(2L to "+2h", 12L to "+12h", 24L to "+24h", 48L to "+48h").forEach { (h, label) ->
-                        FilterChip(
-                            selected = deadlineHours == h,
-                            onClick = { deadlineHours = h },
-                            label = { Text(label) }
-                        )
+                DateTimePickerField(
+                    label = "Task Deadline Date & Time",
+                    epochMs = deadlineEpochMs,
+                    onDateTimeSelected = { deadlineEpochMs = it },
+                    testTagPrefix = "task_deadline"
+                )
+                if (initialTask != null) {
+                    Text("Task Status", style = MaterialTheme.typography.labelLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TaskStatus.entries.forEach { st ->
+                            FilterChip(
+                                selected = selectedStatus == st,
+                                onClick = { selectedStatus = st },
+                                label = { Text(st.label) }
+                            )
+                        }
                     }
                 }
                 if (channels.isNotEmpty()) {
                     Text("Linked Team Chat", style = MaterialTheme.typography.labelLarge)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        channels.take(3).forEach { ch ->
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(channels, key = { it.id }) { ch ->
                             FilterChip(
                                 selected = selectedChannelId == ch.id,
                                 onClick = { selectedChannelId = ch.id },
@@ -842,16 +1019,15 @@ private fun CreateTaskDialog(
             }
         },
         confirmButton = {
-            val capacity = capacityText.toLongOrNull()?.coerceIn(1L, 50L) ?: 1L
+            val capacity = (capacityText.toLongOrNull() ?: minCap).coerceIn(minCap, 50L)
             Button(
                 onClick = {
-                    val deadlineMs = System.currentTimeMillis() + deadlineHours * 3_600_000L
-                    onCreate(title, description, deadlineMs, capacity, selectedChannelId)
+                    onSave(title, description, deadlineEpochMs, capacity, selectedStatus, selectedChannelId)
                 },
                 enabled = title.trim().length >= 2,
                 modifier = Modifier.testTag("confirm_create_task_button")
             ) {
-                Text("Add Task")
+                Text(if (initialTask == null) "Add Task" else "Save Changes")
             }
         },
         dismissButton = {

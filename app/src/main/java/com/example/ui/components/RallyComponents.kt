@@ -15,14 +15,34 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,6 +73,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 @Composable
 fun RoleBadge(
@@ -290,13 +311,223 @@ fun EngagementBarChart(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DateTimePickerField(
+    label: String,
+    epochMs: Long,
+    onDateTimeSelected: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+    testTagPrefix: String = "datetime"
+) {
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Text(text = label, style = MaterialTheme.typography.labelLarge)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            OutlinedButton(
+                onClick = { showDatePicker = true },
+                modifier = Modifier
+                    .weight(1f)
+                    .minimumInteractiveComponentSize()
+                    .testTag("${testTagPrefix}_date_button")
+            ) {
+                Icon(Icons.Rounded.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = RallyDateFormat.formatDateFull(epochMs),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            OutlinedButton(
+                onClick = { showTimePicker = true },
+                modifier = Modifier
+                    .weight(0.85f)
+                    .minimumInteractiveComponentSize()
+                    .testTag("${testTagPrefix}_time_button")
+            ) {
+                Icon(Icons.Rounded.Schedule, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = RallyDateFormat.formatTime(epochMs),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+
+    if (showDatePicker) {
+        val localCal = remember(epochMs) { Calendar.getInstance().apply { timeInMillis = epochMs } }
+        val initialUtcMs = remember(epochMs) {
+            Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                clear()
+                set(
+                    localCal.get(Calendar.YEAR),
+                    localCal.get(Calendar.MONTH),
+                    localCal.get(Calendar.DAY_OF_MONTH)
+                )
+            }.timeInMillis
+        }
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = initialUtcMs)
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { selectedUtcMs ->
+                            val utcCal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                                timeInMillis = selectedUtcMs
+                            }
+                            val updatedLocal = Calendar.getInstance().apply {
+                                timeInMillis = epochMs
+                                set(Calendar.YEAR, utcCal.get(Calendar.YEAR))
+                                set(Calendar.MONTH, utcCal.get(Calendar.MONTH))
+                                set(Calendar.DAY_OF_MONTH, utcCal.get(Calendar.DAY_OF_MONTH))
+                            }
+                            onDateTimeSelected(updatedLocal.timeInMillis)
+                        }
+                        showDatePicker = false
+                    }
+                ) {
+                    Text("Apply Date")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) { Text("Cancel") }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
+
+    if (showTimePicker) {
+        val localCal = remember(epochMs) { Calendar.getInstance().apply { timeInMillis = epochMs } }
+        val timePickerState = rememberTimePickerState(
+            initialHour = localCal.get(Calendar.HOUR_OF_DAY),
+            initialMinute = localCal.get(Calendar.MINUTE),
+            is24Hour = false
+        )
+        AlertDialog(
+            onDismissRequest = { showTimePicker = false },
+            title = { Text("Select Time") },
+            text = {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth()) {
+                    TimePicker(state = timePickerState)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val updatedLocal = Calendar.getInstance().apply {
+                            timeInMillis = epochMs
+                            set(Calendar.HOUR_OF_DAY, timePickerState.hour)
+                            set(Calendar.MINUTE, timePickerState.minute)
+                            set(Calendar.SECOND, 0)
+                            set(Calendar.MILLISECOND, 0)
+                        }
+                        onDateTimeSelected(updatedLocal.timeInMillis)
+                        showTimePicker = false
+                    }
+                ) {
+                    Text("Apply Time")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTimePicker = false }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+@Composable
+fun ReminderEditorDialog(
+    itemTitle: String,
+    targetEpochMs: Long,
+    currentReminderEpochMs: Long?,
+    onDismiss: () -> Unit,
+    onSave: (Long) -> Unit,
+    onRemove: () -> Unit
+) {
+    var triggerMs by remember(currentReminderEpochMs, targetEpochMs) {
+        mutableLongStateOf(
+            currentReminderEpochMs ?: maxOf(System.currentTimeMillis() + 60_000L, targetEpochMs - 15 * 60_000L)
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (currentReminderEpochMs != null) "Edit Reminder Time" else "Set Reminder Time") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = itemTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text("Quick Offsets", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(15 to "15m before", 60 to "1h before", 1440 to "1d before").forEach { (mins, label) ->
+                        val presetMs = maxOf(System.currentTimeMillis() + 60_000L, targetEpochMs - mins * 60_000L)
+                        FilterChip(
+                            selected = kotlin.math.abs(triggerMs - presetMs) < 60_000L,
+                            onClick = { triggerMs = presetMs },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                DateTimePickerField(
+                    label = "Reminder Date & Time",
+                    epochMs = triggerMs,
+                    onDateTimeSelected = { triggerMs = it },
+                    testTagPrefix = "reminder_picker"
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(triggerMs) },
+                modifier = Modifier.testTag("save_reminder_button")
+            ) {
+                Text("Save Reminder")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (currentReminderEpochMs != null) {
+                    TextButton(
+                        onClick = onRemove,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier.testTag("remove_reminder_button")
+                    ) {
+                        Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Remove")
+                    }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    )
+}
+
 object RallyDateFormat {
     private val dateShort = SimpleDateFormat("MMM d", Locale.getDefault())
+    private val dateFull = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
     private val dateTimeShort = SimpleDateFormat("MMM d, h:mm a", Locale.getDefault())
     private val timeShort = SimpleDateFormat("h:mm a", Locale.getDefault())
     private val monthYear = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
 
     fun formatDate(epochMs: Long): String = dateShort.format(Date(epochMs))
+    fun formatDateFull(epochMs: Long): String = dateFull.format(Date(epochMs))
     fun formatDateTime(epochMs: Long): String = dateTimeShort.format(Date(epochMs))
     fun formatTime(epochMs: Long): String = timeShort.format(Date(epochMs))
     fun formatMonthYear(cal: Calendar): String = monthYear.format(cal.time)

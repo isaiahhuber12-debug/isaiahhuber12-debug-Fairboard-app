@@ -26,10 +26,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -73,6 +76,10 @@ fun ChatsScreen(
     val channels = (uiState.channelsState as? UiState.Success)?.data.orEmpty()
     val activeChannel = channels.firstOrNull { it.id == uiState.selectedChannelId }
     var showCreateChannelDialog by remember { mutableStateOf(false) }
+    var editingChannel by remember { mutableStateOf<ChatChannel?>(null) }
+
+    val canManageChannels = uiState.currentRole.canManageEventsAndTasks
+    val isAdminOrCreator = uiState.currentRole.canAccessAdminPanel
 
     if (activeChannel != null) {
         BackHandler { actions.selectChannel(null) }
@@ -81,14 +88,19 @@ fun ChatsScreen(
             channel = activeChannel,
             messages = messages,
             currentUid = uiState.currentUserId,
+            canManageChannel = canManageChannels,
+            canDeleteMessages = isAdminOrCreator,
             onBack = { actions.selectChannel(null) },
+            onEditChannel = { editingChannel = activeChannel },
             onSendMessage = { text -> actions.sendMessage(activeChannel.id, text) },
+            onEditMessage = { messageId, newText -> actions.editMessage(activeChannel.id, messageId, newText) },
+            onDeleteMessage = { messageId -> actions.deleteMessage(activeChannel.id, messageId) },
             modifier = modifier
         )
     } else {
         Scaffold(
             floatingActionButton = {
-                if (uiState.currentRole.canManageEventsAndTasks) {
+                if (canManageChannels) {
                     FloatingActionButton(
                         onClick = { showCreateChannelDialog = true },
                         containerColor = MaterialTheme.colorScheme.primary,
@@ -118,7 +130,11 @@ fun ChatsScreen(
                         Column {
                             Text("Group Channels", style = MaterialTheme.typography.headlineSmall)
                             Text(
-                                text = "Role-scoped chats for hundreds of participants and teams.",
+                                text = if (canManageChannels) {
+                                    "Role-scoped chats for hundreds of participants and teams."
+                                } else {
+                                    "Message teams in channels you belong to."
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -144,6 +160,8 @@ fun ChatsScreen(
                         items(channels, key = { it.id }) { channel ->
                             ChannelCard(
                                 channel = channel,
+                                canEdit = canManageChannels,
+                                onEdit = { editingChannel = channel },
                                 onClick = { actions.selectChannel(channel.id) }
                             )
                         }
@@ -154,12 +172,25 @@ fun ChatsScreen(
     }
 
     if (showCreateChannelDialog) {
-        CreateChannelDialog(
-            canCreateAdminChannel = uiState.currentRole.canAccessAdminPanel,
+        ChannelEditorDialog(
+            initialChannel = null,
+            canUseAdminLevel = isAdminOrCreator,
             onDismiss = { showCreateChannelDialog = false },
-            onCreate = { name, desc, level ->
+            onSave = { name, desc, level ->
                 actions.createChannel(name, desc, level)
                 showCreateChannelDialog = false
+            }
+        )
+    }
+
+    editingChannel?.let { ch ->
+        ChannelEditorDialog(
+            initialChannel = ch,
+            canUseAdminLevel = isAdminOrCreator,
+            onDismiss = { editingChannel = null },
+            onSave = { name, desc, level ->
+                actions.updateChannel(ch.id, name, desc, level)
+                editingChannel = null
             }
         )
     }
@@ -168,6 +199,8 @@ fun ChatsScreen(
 @Composable
 private fun ChannelCard(
     channel: ChatChannel,
+    canEdit: Boolean,
+    onEdit: () -> Unit,
     onClick: () -> Unit
 ) {
     val level = channel.parsedAccessLevel()
@@ -238,6 +271,18 @@ private fun ChannelCard(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary
             )
+            if (canEdit) {
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier.testTag("edit_channel_${channel.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Edit,
+                        contentDescription = "Edit channel",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }
@@ -247,11 +292,18 @@ private fun ChatThreadView(
     channel: ChatChannel,
     messages: List<ChatMessage>,
     currentUid: String,
+    canManageChannel: Boolean,
+    canDeleteMessages: Boolean,
     onBack: () -> Unit,
+    onEditChannel: () -> Unit,
     onSendMessage: (String) -> Unit,
+    onEditMessage: (String, String) -> Unit,
+    onDeleteMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var draft by remember { mutableStateOf("") }
+    var messageToEdit by remember { mutableStateOf<ChatMessage?>(null) }
+    var messageToDelete by remember { mutableStateOf<ChatMessage?>(null) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size) {
@@ -297,6 +349,14 @@ private fun ChatThreadView(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+                    if (canManageChannel) {
+                        IconButton(
+                            onClick = onEditChannel,
+                            modifier = Modifier.testTag("edit_active_channel_button")
+                        ) {
+                            Icon(Icons.Rounded.Edit, contentDescription = "Edit channel details")
+                        }
+                    }
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
@@ -327,7 +387,16 @@ private fun ChatThreadView(
                     items(messages, key = { it.id }) { msg ->
                         val isMe = msg.senderId == currentUid
                         val isAnnouncement = msg.parsedType() == MessageType.ANNOUNCEMENT
-                        MessageBubble(msg = msg, isMe = isMe, isAnnouncement = isAnnouncement)
+                        val canEdit = isMe || canDeleteMessages
+                        MessageBubble(
+                            msg = msg,
+                            isMe = isMe,
+                            isAnnouncement = isAnnouncement,
+                            canEdit = canEdit,
+                            canDelete = canDeleteMessages,
+                            onEditClick = { messageToEdit = msg },
+                            onDeleteClick = { messageToDelete = msg }
+                        )
                     }
                 }
             }
@@ -380,13 +449,77 @@ private fun ChatThreadView(
             }
         }
     }
+
+    messageToEdit?.let { target ->
+        var editedText by remember(target.id) { mutableStateOf(target.text) }
+        AlertDialog(
+            onDismissRequest = { messageToEdit = null },
+            title = { Text("Edit Message") },
+            text = {
+                OutlinedTextField(
+                    value = editedText,
+                    onValueChange = { editedText = it.take(2000) },
+                    label = { Text("Message text") },
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth().testTag("edit_message_input")
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onEditMessage(target.id, editedText)
+                        messageToEdit = null
+                    },
+                    enabled = editedText.trim().isNotEmpty(),
+                    modifier = Modifier.testTag("confirm_edit_message_button")
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageToEdit = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    messageToDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { messageToDelete = null },
+            title = { Text("Delete Message") },
+            text = {
+                Text("Delete this message from ${target.senderName}? This action cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteMessage(target.id)
+                        messageToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.testTag("confirm_delete_message_button")
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageToDelete = null }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 @Composable
 private fun MessageBubble(
     msg: ChatMessage,
     isMe: Boolean,
-    isAnnouncement: Boolean
+    isAnnouncement: Boolean,
+    canEdit: Boolean,
+    canDelete: Boolean,
+    onEditClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
     val alignment = if (isMe) Alignment.End else Alignment.Start
     val bubbleColor = when {
@@ -420,49 +553,120 @@ private fun MessageBubble(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (msg.updatedAt != null) {
+                Text(
+                    text = "• Edited",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         Spacer(Modifier.height(4.dp))
-        Surface(
-            color = bubbleColor,
-            contentColor = textColor,
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier
-                .widthIn(max = 320.dp)
-                .then(
-                    if (!isMe && !isAnnouncement) {
-                        Modifier.border(
-                            1.dp,
-                            MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
-                            RoundedCornerShape(16.dp)
-                        )
-                    } else Modifier
-                )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Text(
-                text = msg.text,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-            )
+            if (isMe && (canEdit || canDelete)) {
+                MessageActionIcons(
+                    messageId = msg.id,
+                    canEdit = canEdit,
+                    canDelete = canDelete,
+                    onEditClick = onEditClick,
+                    onDeleteClick = onDeleteClick
+                )
+            }
+            Surface(
+                color = bubbleColor,
+                contentColor = textColor,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .widthIn(max = 320.dp)
+                    .then(
+                        if (!isMe && !isAnnouncement) {
+                            Modifier.border(
+                                1.dp,
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                                RoundedCornerShape(16.dp)
+                            )
+                        } else Modifier
+                    )
+            ) {
+                Text(
+                    text = msg.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                )
+            }
+            if (!isMe && (canEdit || canDelete)) {
+                MessageActionIcons(
+                    messageId = msg.id,
+                    canEdit = canEdit,
+                    canDelete = canDelete,
+                    onEditClick = onEditClick,
+                    onDeleteClick = onDeleteClick
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun CreateChannelDialog(
-    canCreateAdminChannel: Boolean,
-    onDismiss: () -> Unit,
-    onCreate: (String, String, ChannelAccessLevel) -> Unit
+private fun MessageActionIcons(
+    messageId: String,
+    canEdit: Boolean,
+    canDelete: Boolean,
+    onEditClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
-    var accessLevel by remember { mutableStateOf(ChannelAccessLevel.ALL) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (canEdit) {
+            IconButton(
+                onClick = onEditClick,
+                modifier = Modifier.testTag("edit_message_$messageId")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Edit,
+                    contentDescription = "Edit message",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+        if (canDelete) {
+            IconButton(
+                onClick = onDeleteClick,
+                modifier = Modifier.testTag("delete_message_$messageId")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.DeleteOutline,
+                    contentDescription = "Delete message",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
 
-    val availableLevels = if (canCreateAdminChannel) ChannelAccessLevel.entries
+@Composable
+private fun ChannelEditorDialog(
+    initialChannel: ChatChannel?,
+    canUseAdminLevel: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String, String, ChannelAccessLevel) -> Unit
+) {
+    var name by remember(initialChannel?.id) { mutableStateOf(initialChannel?.name.orEmpty()) }
+    var description by remember(initialChannel?.id) { mutableStateOf(initialChannel?.description.orEmpty()) }
+    var accessLevel by remember(initialChannel?.id) {
+        mutableStateOf(initialChannel?.parsedAccessLevel() ?: ChannelAccessLevel.ALL)
+    }
+
+    val availableLevels = if (canUseAdminLevel) ChannelAccessLevel.entries
     else listOf(ChannelAccessLevel.ALL, ChannelAccessLevel.ORGANIZER)
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Create Group Chat") },
+        title = { Text(if (initialChannel == null) "Create Group Chat" else "Edit Group Chat") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
@@ -493,11 +697,11 @@ private fun CreateChannelDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onCreate(name, description, accessLevel) },
+                onClick = { onSave(name, description, accessLevel) },
                 enabled = name.trim().length >= 2,
                 modifier = Modifier.testTag("confirm_create_channel_button")
             ) {
-                Text("Create Channel")
+                Text(if (initialChannel == null) "Create Channel" else "Save Changes")
             }
         },
         dismissButton = {

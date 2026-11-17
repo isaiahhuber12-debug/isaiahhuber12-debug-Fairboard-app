@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.model.ApprovalStatus
 import com.example.data.model.ChannelAccessLevel
 import com.example.data.model.ChatChannel
 import com.example.data.model.ChatMessage
@@ -17,6 +18,7 @@ import com.example.data.model.MessageType
 import com.example.data.model.NotificationType
 import com.example.data.model.RallyEvent
 import com.example.data.model.RallyGroup
+import com.example.data.model.TaskStatus
 import com.example.data.remote.RallyHubRepository
 import com.example.notifications.RallyNotificationHelper
 import com.google.firebase.Firebase
@@ -46,7 +48,7 @@ class CloudRallyViewModel(
     private val _selectedEventId = MutableStateFlow<String?>(null)
     private val _selectedChannelId = MutableStateFlow<String?>(null)
     private val _allTasksByEvent = MutableStateFlow<Map<String, List<EventTask>>>(emptyMap())
-    private val _remindedIds = MutableStateFlow<Set<String>>(emptySet())
+    private val _remindedTimes = MutableStateFlow<Map<String, Long>>(emptyMap())
     private val _bannerMessage = MutableStateFlow<String?>(null)
     private val _isBusy = MutableStateFlow(false)
 
@@ -207,7 +209,7 @@ class CloudRallyViewModel(
         notificationsFlow,
         _selectedEventId,
         _selectedChannelId,
-        _remindedIds,
+        _remindedTimes,
         _bannerMessage,
         _isBusy
     ) { values ->
@@ -224,7 +226,7 @@ class CloudRallyViewModel(
         val notificationsUi = values[9] as UiState<List<HubNotification>>
         val selectedEventId = values[10] as String?
         val selectedChannelId = values[11] as String?
-        val remindedIds = values[12] as Set<String>
+        val remindedTimes = values[12] as Map<String, Long>
         val banner = values[13] as String?
         val isBusy = values[14] as Boolean
 
@@ -274,7 +276,8 @@ class CloudRallyViewModel(
             notificationsState = notificationsUi,
             membersState = membersUi,
             analytics = analytics,
-            remindedItemIds = remindedIds,
+            remindedItemIds = remindedTimes.keys,
+            remindedTimes = remindedTimes,
             bannerMessage = banner,
             isBusy = isBusy
         )
@@ -282,16 +285,18 @@ class CloudRallyViewModel(
 
     private fun dispatchLocalAlertsForNewNotifications(list: List<HubNotification>) {
         if (!notificationsInitialized) {
-            list.forEach { seenNotificationIds.add(it.id) }
+            list.forEach { seenNotificationIds.add("${it.id}_${it.approvalStatus}") }
             notificationsInitialized = true
             return
         }
         list.forEach { notif ->
-            if (notif.id.isNotBlank() && seenNotificationIds.add(notif.id) && notif.senderId != currentUserId) {
+            val key = "${notif.id}_${notif.approvalStatus}"
+            if (notif.id.isNotBlank() && seenNotificationIds.add(key) && notif.senderId != currentUserId) {
+                val isPending = notif.parsedApprovalStatus() == ApprovalStatus.PENDING
                 RallyNotificationHelper.postNotification(
                     context = appContext,
-                    id = notif.id.hashCode(),
-                    title = notif.title,
+                    id = key.hashCode(),
+                    title = if (isPending) "Approval Needed: ${notif.title}" else notif.title,
                     body = notif.body,
                     type = notif.parsedType()
                 )
@@ -352,7 +357,37 @@ class CloudRallyViewModel(
             res.onSuccess { updated ->
                 _bannerMessage.value = "Group code updated to $updated"
             }.onFailure { err ->
-                _bannerMessage.value = err.localizedMessage ?: "Only the group creator can change the group code"
+                _bannerMessage.value = err.localizedMessage ?: "Only Admins or the Group Creator can change the group code"
+            }
+        }
+    }
+
+    override fun updateGroupDetails(name: String, description: String) {
+        val group = uiState.value.activeGroup ?: return
+        if (!uiState.value.currentRole.canAccessAdminPanel) {
+            _bannerMessage.value = "Only Admins or the Group Creator can edit group details."
+            return
+        }
+        viewModelScope.launch {
+            _isBusy.value = true
+            val res = repository.updateGroupDetails(group.id, name, description, group.groupCode)
+            _isBusy.value = false
+            res.onSuccess {
+                _bannerMessage.value = "Group details updated"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to update group"
+            }
+        }
+    }
+
+    override fun updateDisplayName(newDisplayName: String) {
+        val groupId = uiState.value.activeGroup?.id ?: return
+        viewModelScope.launch {
+            val res = repository.updateOwnDisplayName(groupId, newDisplayName)
+            res.onSuccess {
+                _bannerMessage.value = "Display name updated"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to update display name"
             }
         }
     }
@@ -388,6 +423,39 @@ class CloudRallyViewModel(
         }
     }
 
+    override fun updateEvent(
+        eventId: String,
+        title: String,
+        description: String,
+        location: String,
+        category: String,
+        startEpochMs: Long,
+        endEpochMs: Long
+    ) {
+        val state = uiState.value
+        val groupId = state.activeGroup?.id ?: return
+        viewModelScope.launch {
+            _isBusy.value = true
+            val res = repository.updateEvent(
+                groupId = groupId,
+                eventId = eventId,
+                title = title,
+                description = description,
+                location = location,
+                category = category,
+                startEpochMs = startEpochMs,
+                endEpochMs = endEpochMs,
+                organizerName = state.currentUserName
+            )
+            _isBusy.value = false
+            res.onSuccess {
+                _bannerMessage.value = "Event '$title' updated"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to update event"
+            }
+        }
+    }
+
     override fun createTask(
         eventId: String,
         title: String,
@@ -413,6 +481,43 @@ class CloudRallyViewModel(
                 _bannerMessage.value = "Task '$title' published"
             }.onFailure { err ->
                 _bannerMessage.value = err.localizedMessage ?: "Failed to create task"
+            }
+        }
+    }
+
+    override fun updateTask(
+        eventId: String,
+        taskId: String,
+        title: String,
+        description: String,
+        deadlineEpochMs: Long,
+        capacity: Long,
+        status: TaskStatus,
+        chatChannelId: String?
+    ) {
+        val state = uiState.value
+        val groupId = state.activeGroup?.id ?: return
+        val existing = state.allTasksByEvent[eventId]?.firstOrNull { it.id == taskId }
+        val assignedCount = existing?.assignedCount ?: 0L
+        viewModelScope.launch {
+            _isBusy.value = true
+            val res = repository.updateTask(
+                groupId = groupId,
+                eventId = eventId,
+                taskId = taskId,
+                title = title,
+                description = description,
+                deadlineEpochMs = deadlineEpochMs,
+                capacity = capacity,
+                assignedCount = assignedCount,
+                status = status,
+                chatChannelId = chatChannelId
+            )
+            _isBusy.value = false
+            res.onSuccess {
+                _bannerMessage.value = "Task '$title' updated"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to update task"
             }
         }
     }
@@ -444,6 +549,25 @@ class CloudRallyViewModel(
         }
     }
 
+    override fun updateChannel(
+        channelId: String,
+        name: String,
+        description: String,
+        accessLevel: ChannelAccessLevel
+    ) {
+        val groupId = uiState.value.activeGroup?.id ?: return
+        viewModelScope.launch {
+            _isBusy.value = true
+            val res = repository.updateChannel(groupId, channelId, name, description, accessLevel)
+            _isBusy.value = false
+            res.onSuccess {
+                _bannerMessage.value = "Updated #${name.trim()} channel"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to update channel"
+            }
+        }
+    }
+
     override fun sendMessage(channelId: String, text: String) {
         val state = uiState.value
         val groupId = state.activeGroup?.id ?: return
@@ -462,6 +586,36 @@ class CloudRallyViewModel(
         }
     }
 
+    override fun editMessage(channelId: String, messageId: String, newText: String) {
+        val state = uiState.value
+        val groupId = state.activeGroup?.id ?: return
+        viewModelScope.launch {
+            val res = repository.updateMessage(groupId, channelId, messageId, newText)
+            res.onSuccess {
+                _bannerMessage.value = "Message updated"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to update message"
+            }
+        }
+    }
+
+    override fun deleteMessage(channelId: String, messageId: String) {
+        val state = uiState.value
+        if (!state.currentRole.canAccessAdminPanel) {
+            _bannerMessage.value = "Only an Admin can delete messages."
+            return
+        }
+        val groupId = state.activeGroup?.id ?: return
+        viewModelScope.launch {
+            val res = repository.deleteMessage(groupId, channelId, messageId)
+            res.onSuccess {
+                _bannerMessage.value = "Message deleted"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to delete message"
+            }
+        }
+    }
+
     override fun sendNotification(
         title: String,
         body: String,
@@ -470,10 +624,16 @@ class CloudRallyViewModel(
         targetRole: String,
         targetChannelId: String?,
         targetChannelName: String?,
-        targetEventId: String?
+        targetEventId: String?,
+        scheduledForEpochMs: Long?
     ) {
         val state = uiState.value
         val groupId = state.activeGroup?.id ?: return
+        val needsApproval = type == NotificationType.ANNOUNCEMENT && !state.currentRole.canAccessAdminPanel
+        val resolvedScope = if (needsApproval) "ALL" else targetScope
+        val resolvedTargetRole = if (needsApproval) "ADMIN" else targetRole
+        val resolvedStatus = if (needsApproval) ApprovalStatus.PENDING else ApprovalStatus.APPROVED
+
         viewModelScope.launch {
             _isBusy.value = true
             val res = repository.sendNotification(
@@ -481,18 +641,99 @@ class CloudRallyViewModel(
                 title = title,
                 body = body,
                 notificationType = type,
-                targetScope = targetScope,
-                targetRole = targetRole,
-                targetChannelId = targetChannelId,
-                targetChannelName = targetChannelName,
+                targetScope = resolvedScope,
+                targetRole = resolvedTargetRole,
+                targetChannelId = if (needsApproval) null else targetChannelId,
+                targetChannelName = if (needsApproval) null else targetChannelName,
                 targetEventId = targetEventId,
-                senderName = state.currentUserName
+                senderName = state.currentUserName,
+                scheduledForEpochMs = scheduledForEpochMs,
+                approvalStatus = resolvedStatus
             )
             _isBusy.value = false
             res.onSuccess {
-                _bannerMessage.value = "Alert dispatched to ${targetChannelName ?: targetRole}"
+                _bannerMessage.value = if (needsApproval) {
+                    "Announcement submitted for Admin approval before posting"
+                } else {
+                    "Alert dispatched to ${targetChannelName ?: targetRole}"
+                }
             }.onFailure { err ->
                 _bannerMessage.value = err.localizedMessage ?: "Failed to send alert"
+            }
+        }
+    }
+
+    override fun updateNotification(
+        notificationId: String,
+        title: String,
+        body: String,
+        type: NotificationType,
+        targetScope: String,
+        targetRole: String,
+        targetChannelId: String?,
+        targetChannelName: String?,
+        targetEventId: String?,
+        scheduledForEpochMs: Long?
+    ) {
+        val state = uiState.value
+        val groupId = state.activeGroup?.id ?: return
+        val isPendingSubmission = type == NotificationType.ANNOUNCEMENT && !state.currentRole.canAccessAdminPanel
+        viewModelScope.launch {
+            _isBusy.value = true
+            val res = repository.updateNotification(
+                groupId = groupId,
+                notificationId = notificationId,
+                title = title,
+                body = body,
+                notificationType = type,
+                targetScope = if (isPendingSubmission) "ALL" else targetScope,
+                targetRole = if (isPendingSubmission) "ADMIN" else targetRole,
+                targetChannelId = if (isPendingSubmission) null else targetChannelId,
+                targetChannelName = if (isPendingSubmission) null else targetChannelName,
+                targetEventId = targetEventId,
+                scheduledForEpochMs = scheduledForEpochMs
+            )
+            _isBusy.value = false
+            res.onSuccess {
+                _bannerMessage.value = "Alert updated"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to update alert"
+            }
+        }
+    }
+
+    override fun approveNotification(notificationId: String) {
+        val state = uiState.value
+        if (!state.currentRole.canAccessAdminPanel) {
+            _bannerMessage.value = "Only an Admin can approve announcements."
+            return
+        }
+        val groupId = state.activeGroup?.id ?: return
+        viewModelScope.launch {
+            _isBusy.value = true
+            val res = repository.approveNotification(groupId, notificationId)
+            _isBusy.value = false
+            res.onSuccess {
+                _bannerMessage.value = "Announcement approved and posted to everyone!"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to approve announcement"
+            }
+        }
+    }
+
+    override fun deleteNotification(notificationId: String) {
+        val state = uiState.value
+        if (!state.currentRole.canAccessAdminPanel) {
+            _bannerMessage.value = "Only an Admin can delete announcements."
+            return
+        }
+        val groupId = state.activeGroup?.id ?: return
+        viewModelScope.launch {
+            val res = repository.deleteNotification(groupId, notificationId)
+            res.onSuccess {
+                _bannerMessage.value = "Announcement deleted"
+            }.onFailure { err ->
+                _bannerMessage.value = err.localizedMessage ?: "Failed to delete announcement"
             }
         }
     }
@@ -510,21 +751,29 @@ class CloudRallyViewModel(
     }
 
     override fun toggleReminder(itemId: String, title: String, body: String, triggerAtEpochMs: Long) {
-        val current = _remindedIds.value
+        val current = _remindedTimes.value
         if (itemId in current) {
-            _remindedIds.value = current - itemId
-            _bannerMessage.value = "Reminder removed"
+            removeReminder(itemId)
         } else {
-            _remindedIds.value = current + itemId
-            RallyNotificationHelper.scheduleReminder(
-                context = appContext,
-                reminderId = itemId,
-                title = title,
-                body = body,
-                triggerAtEpochMs = triggerAtEpochMs
-            )
-            _bannerMessage.value = "Reminder scheduled for $title"
+            scheduleOrUpdateReminder(itemId, title, body, triggerAtEpochMs)
         }
+    }
+
+    override fun scheduleOrUpdateReminder(itemId: String, title: String, body: String, triggerAtEpochMs: Long) {
+        _remindedTimes.value = _remindedTimes.value + (itemId to triggerAtEpochMs)
+        RallyNotificationHelper.scheduleReminder(
+            context = appContext,
+            reminderId = itemId,
+            title = title,
+            body = body,
+            triggerAtEpochMs = triggerAtEpochMs
+        )
+        _bannerMessage.value = "Reminder set for $title"
+    }
+
+    override fun removeReminder(itemId: String) {
+        _remindedTimes.value = _remindedTimes.value - itemId
+        _bannerMessage.value = "Reminder removed"
     }
 
     override fun clearBanner() {

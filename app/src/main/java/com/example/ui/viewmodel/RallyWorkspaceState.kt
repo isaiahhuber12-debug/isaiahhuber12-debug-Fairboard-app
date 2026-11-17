@@ -12,6 +12,7 @@ import com.example.data.model.MemberRole
 import com.example.data.model.NotificationType
 import com.example.data.model.RallyEvent
 import com.example.data.model.RallyGroup
+import com.example.data.model.TaskStatus
 
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>
@@ -38,6 +39,7 @@ data class RallyWorkspaceUiState(
     val membersState: UiState<List<GroupMember>> = UiState.Success(emptyList()),
     val analytics: EngagementAnalytics = EngagementAnalytics(),
     val remindedItemIds: Set<String> = emptySet(),
+    val remindedTimes: Map<String, Long> = emptyMap(),
     val bannerMessage: String? = null,
     val isBusy: Boolean = false
 )
@@ -49,7 +51,18 @@ interface RallyWorkspaceActions {
     fun joinGroupByCode(code: String, displayName: String?)
     fun createGroupWithCode(name: String, description: String, groupCode: String)
     fun updateGroupCode(newCode: String)
+    fun updateGroupDetails(name: String, description: String)
+    fun updateDisplayName(newDisplayName: String)
     fun createEvent(
+        title: String,
+        description: String,
+        location: String,
+        category: String,
+        startEpochMs: Long,
+        endEpochMs: Long
+    )
+    fun updateEvent(
+        eventId: String,
         title: String,
         description: String,
         location: String,
@@ -65,9 +78,22 @@ interface RallyWorkspaceActions {
         capacity: Long,
         chatChannelId: String?
     )
+    fun updateTask(
+        eventId: String,
+        taskId: String,
+        title: String,
+        description: String,
+        deadlineEpochMs: Long,
+        capacity: Long,
+        status: TaskStatus,
+        chatChannelId: String?
+    )
     fun toggleTaskSignup(eventId: String, taskId: String)
     fun createChannel(name: String, description: String, accessLevel: ChannelAccessLevel)
+    fun updateChannel(channelId: String, name: String, description: String, accessLevel: ChannelAccessLevel)
     fun sendMessage(channelId: String, text: String)
+    fun editMessage(channelId: String, messageId: String, newText: String)
+    fun deleteMessage(channelId: String, messageId: String)
     fun sendNotification(
         title: String,
         body: String,
@@ -76,10 +102,27 @@ interface RallyWorkspaceActions {
         targetRole: String,
         targetChannelId: String?,
         targetChannelName: String?,
-        targetEventId: String?
+        targetEventId: String?,
+        scheduledForEpochMs: Long? = null
     )
+    fun updateNotification(
+        notificationId: String,
+        title: String,
+        body: String,
+        type: NotificationType,
+        targetScope: String,
+        targetRole: String,
+        targetChannelId: String?,
+        targetChannelName: String?,
+        targetEventId: String?,
+        scheduledForEpochMs: Long? = null
+    )
+    fun approveNotification(notificationId: String)
+    fun deleteNotification(notificationId: String)
     fun updateMemberRole(memberUid: String, newRole: MemberRole)
     fun toggleReminder(itemId: String, title: String, body: String, triggerAtEpochMs: Long)
+    fun scheduleOrUpdateReminder(itemId: String, title: String, body: String, triggerAtEpochMs: Long)
+    fun removeReminder(itemId: String)
     fun clearBanner()
     fun leaveSession()
 }

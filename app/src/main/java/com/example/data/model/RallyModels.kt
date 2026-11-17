@@ -58,6 +58,16 @@ enum class NotificationType(val label: String) {
     }
 }
 
+enum class ApprovalStatus(val label: String) {
+    PENDING("Pending Admin Approval"),
+    APPROVED("Posted");
+
+    companion object {
+        fun fromRaw(raw: String?): ApprovalStatus =
+            entries.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: APPROVED
+    }
+}
+
 enum class MessageType {
     TEXT,
     ANNOUNCEMENT,
@@ -200,7 +210,8 @@ data class ChatMessage(
     val senderRole: String = MemberRole.PARTICIPANT.name,
     val text: String = "",
     val messageType: String = MessageType.TEXT.name,
-    @ServerTimestamp val createdAt: Timestamp? = null
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun parsedRole(): MemberRole = MemberRole.fromRaw(senderRole)
     fun parsedType(): MessageType = MessageType.fromRaw(messageType)
@@ -221,9 +232,12 @@ data class HubNotification(
     val senderId: String = "",
     val senderName: String = "",
     val scheduledForEpochMs: Long? = null,
-    @ServerTimestamp val createdAt: Timestamp? = null
+    val approvalStatus: String = ApprovalStatus.APPROVED.name,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     fun parsedType(): NotificationType = NotificationType.fromRaw(notificationType)
+    fun parsedApprovalStatus(): ApprovalStatus = ApprovalStatus.fromRaw(approvalStatus)
 }
 
 data class EngagementAnalytics(

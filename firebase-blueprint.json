@@ -151,7 +151,8 @@
         "senderRole": { "type": "string", "enum": ["CREATOR", "ADMIN", "ORGANIZER", "PARTICIPANT"] },
         "text": { "type": "string" },
         "messageType": { "type": "string", "enum": ["TEXT", "ANNOUNCEMENT", "TASK_UPDATE"] },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["channelId", "senderId", "senderName", "senderRole", "text", "messageType", "createdAt"]
     },
@@ -171,7 +172,9 @@
         "senderId": { "type": "string" },
         "senderName": { "type": "string" },
         "scheduledForEpochMs": { "type": "integer" },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "approvalStatus": { "type": "string", "enum": ["PENDING", "APPROVED"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "body", "notificationType", "targetScope", "targetRole", "senderId", "senderName", "createdAt"]
     }

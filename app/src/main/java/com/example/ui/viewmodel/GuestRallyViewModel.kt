@@ -11,6 +11,7 @@ import com.example.data.local.LocalNotificationEntity
 import com.example.data.local.LocalRallyDao
 import com.example.data.local.LocalRallyDatabase
 import com.example.data.local.LocalTaskEntity
+import com.example.data.model.ApprovalStatus
 import com.example.data.model.ChannelAccessLevel
 import com.example.data.model.ChatChannel
 import com.example.data.model.ChatMessage
@@ -51,7 +52,7 @@ class GuestRallyViewModel(
 
     private val _selectedEventId = MutableStateFlow<String?>(null)
     private val _selectedChannelId = MutableStateFlow<String?>(null)
-    private val _remindedIds = MutableStateFlow<Set<String>>(emptySet())
+    private val _remindedTimes = MutableStateFlow<Map<String, Long>>(emptyMap())
     private val _bannerMessage = MutableStateFlow<String?>(null)
 
     val activeSession: StateFlow<GuestSessionEntity?> = dao.observeLatestSession()
@@ -93,7 +94,7 @@ class GuestRallyViewModel(
         notificationsFlow,
         _selectedEventId,
         _selectedChannelId,
-        _remindedIds,
+        _remindedTimes,
         _bannerMessage
     ) { values ->
         @Suppress("UNCHECKED_CAST")
@@ -105,7 +106,7 @@ class GuestRallyViewModel(
         val notifEntities = values[5] as List<LocalNotificationEntity>
         val selectedEventId = values[6] as String?
         val selectedChannelId = values[7] as String?
-        val remindedIds = values[8] as Set<String>
+        val remindedTimes = values[8] as Map<String, Long>
         val banner = values[9] as String?
 
         val events = eventEntities.map {
@@ -169,7 +170,10 @@ class GuestRallyViewModel(
                 notificationType = it.notificationType,
                 targetScope = it.targetScope,
                 targetChannelName = it.targetChannelName,
+                senderId = session?.participantId ?: "",
                 senderName = it.senderName,
+                scheduledForEpochMs = it.scheduledForEpochMs,
+                approvalStatus = it.approvalStatus,
                 createdAt = Timestamp(Date(it.createdAtMs))
             )
         }
@@ -211,7 +215,8 @@ class GuestRallyViewModel(
             notificationsState = UiState.Success(notifications),
             membersState = UiState.Success(emptyList()),
             analytics = analytics,
-            remindedItemIds = remindedIds,
+            remindedItemIds = remindedTimes.keys,
+            remindedTimes = remindedTimes,
             bannerMessage = banner
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), RallyWorkspaceUiState(isCloudMode = false))
@@ -368,13 +373,31 @@ class GuestRallyViewModel(
         _bannerMessage.value = "Sign in with Google as Admin to create cloud group codes."
     }
     override fun updateGroupCode(newCode: String) {
-        _bannerMessage.value = "Only the cloud Group Creator can modify group codes."
+        _bannerMessage.value = "Only Admins or the Group Creator can modify group codes."
+    }
+    override fun updateGroupDetails(name: String, description: String) {
+        _bannerMessage.value = "Only Admins or the Group Creator can edit group details."
+    }
+    override fun updateDisplayName(newDisplayName: String) {
+        val session = activeSession.value ?: return
+        val clean = newDisplayName.trim().take(60)
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            dao.upsertSession(session.copy(displayName = clean, lastActiveAtMs = System.currentTimeMillis()))
+            _bannerMessage.value = "Display name updated"
+        }
     }
     override fun createEvent(title: String, description: String, location: String, category: String, startEpochMs: Long, endEpochMs: Long) {
         _bannerMessage.value = "Event creation requires Organizer or Admin sign-in."
     }
+    override fun updateEvent(eventId: String, title: String, description: String, location: String, category: String, startEpochMs: Long, endEpochMs: Long) {
+        _bannerMessage.value = "Editing events requires Organizer or Admin sign-in."
+    }
     override fun createTask(eventId: String, title: String, description: String, deadlineEpochMs: Long, capacity: Long, chatChannelId: String?) {
         _bannerMessage.value = "Task creation requires Organizer or Admin sign-in."
+    }
+    override fun updateTask(eventId: String, taskId: String, title: String, description: String, deadlineEpochMs: Long, capacity: Long, status: TaskStatus, chatChannelId: String?) {
+        _bannerMessage.value = "Editing tasks requires Organizer or Admin sign-in."
     }
 
     override fun toggleTaskSignup(eventId: String, taskId: String) {
@@ -415,6 +438,10 @@ class GuestRallyViewModel(
         _bannerMessage.value = "Creating new role-restricted channels requires Admin/Organizer sign-in."
     }
 
+    override fun updateChannel(channelId: String, name: String, description: String, accessLevel: ChannelAccessLevel) {
+        _bannerMessage.value = "Editing channels requires Admin/Organizer sign-in."
+    }
+
     override fun sendMessage(channelId: String, text: String) {
         val session = activeSession.value ?: return
         val trimmed = text.trim()
@@ -435,7 +462,36 @@ class GuestRallyViewModel(
                     )
                 )
             )
+            dao.getChannel(channelId)?.let { ch ->
+                dao.insertChannels(
+                    listOf(
+                        ch.copy(
+                            messageCount = ch.messageCount + 1L,
+                            lastMessagePreview = trimmed.take(160)
+                        )
+                    )
+                )
+            }
         }
+    }
+
+    override fun editMessage(channelId: String, messageId: String, newText: String) {
+        val session = activeSession.value ?: return
+        val trimmed = newText.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val msg = dao.getMessage(messageId) ?: return@launch
+            if (msg.senderId != session.participantId) {
+                _bannerMessage.value = "You can only edit your own messages."
+                return@launch
+            }
+            dao.insertMessages(listOf(msg.copy(text = trimmed)))
+            _bannerMessage.value = "Message updated"
+        }
+    }
+
+    override fun deleteMessage(channelId: String, messageId: String) {
+        _bannerMessage.value = "Only an Admin can delete messages."
     }
 
     override fun sendNotification(
@@ -446,9 +502,57 @@ class GuestRallyViewModel(
         targetRole: String,
         targetChannelId: String?,
         targetChannelName: String?,
-        targetEventId: String?
+        targetEventId: String?,
+        scheduledForEpochMs: Long?
     ) {
-        _bannerMessage.value = "Dispatching targeted group notifications requires Admin/Organizer sign-in."
+        val session = activeSession.value ?: return
+        if (type != NotificationType.ANNOUNCEMENT) {
+            _bannerMessage.value = "Task updates and reminders require Organizer or Admin sign-in."
+            return
+        }
+        viewModelScope.launch {
+            dao.insertNotifications(
+                listOf(
+                    LocalNotificationEntity(
+                        id = "ntf_${UUID.randomUUID().toString().take(12)}",
+                        groupCode = session.groupCode,
+                        title = title.trim(),
+                        body = body.trim(),
+                        notificationType = NotificationType.ANNOUNCEMENT.name,
+                        targetScope = "ALL",
+                        targetChannelName = null,
+                        senderName = session.displayName,
+                        scheduledForEpochMs = scheduledForEpochMs,
+                        approvalStatus = ApprovalStatus.PENDING.name,
+                        createdAtMs = System.currentTimeMillis()
+                    )
+                )
+            )
+            _bannerMessage.value = "Saved as Pending Admin Approval (Sign in with Google as Admin to approve & post to cloud)"
+        }
+    }
+
+    override fun updateNotification(
+        notificationId: String,
+        title: String,
+        body: String,
+        type: NotificationType,
+        targetScope: String,
+        targetRole: String,
+        targetChannelId: String?,
+        targetChannelName: String?,
+        targetEventId: String?,
+        scheduledForEpochMs: Long?
+    ) {
+        _bannerMessage.value = "Editing cloud alerts requires Organizer or Admin sign-in."
+    }
+
+    override fun approveNotification(notificationId: String) {
+        _bannerMessage.value = "Only a signed-in Admin can approve announcements before posting."
+    }
+
+    override fun deleteNotification(notificationId: String) {
+        _bannerMessage.value = "Only an Admin can delete announcements."
     }
 
     override fun updateMemberRole(memberUid: String, newRole: MemberRole) {
@@ -456,15 +560,23 @@ class GuestRallyViewModel(
     }
 
     override fun toggleReminder(itemId: String, title: String, body: String, triggerAtEpochMs: Long) {
-        val current = _remindedIds.value
+        val current = _remindedTimes.value
         if (itemId in current) {
-            _remindedIds.value = current - itemId
-            _bannerMessage.value = "Reminder removed"
+            removeReminder(itemId)
         } else {
-            _remindedIds.value = current + itemId
-            RallyNotificationHelper.scheduleReminder(appContext, itemId, title, body, triggerAtEpochMs)
-            _bannerMessage.value = "Reminder scheduled for $title"
+            scheduleOrUpdateReminder(itemId, title, body, triggerAtEpochMs)
         }
+    }
+
+    override fun scheduleOrUpdateReminder(itemId: String, title: String, body: String, triggerAtEpochMs: Long) {
+        _remindedTimes.value = _remindedTimes.value + (itemId to triggerAtEpochMs)
+        RallyNotificationHelper.scheduleReminder(appContext, itemId, title, body, triggerAtEpochMs)
+        _bannerMessage.value = "Reminder set for $title"
+    }
+
+    override fun removeReminder(itemId: String) {
+        _remindedTimes.value = _remindedTimes.value - itemId
+        _bannerMessage.value = "Reminder removed"
     }
 
     override fun clearBanner() { _bannerMessage.value = null }

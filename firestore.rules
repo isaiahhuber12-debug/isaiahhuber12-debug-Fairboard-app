@@ -218,19 +218,20 @@ service cloud.firestore {
 
     function isValidMessage(data) {
       return data.keys().hasAll(['channelId', 'senderId', 'senderName', 'senderRole', 'text', 'messageType', 'createdAt']) &&
-             data.keys().hasOnly(['channelId', 'senderId', 'senderName', 'senderRole', 'text', 'messageType', 'createdAt']) &&
+             data.keys().hasOnly(['channelId', 'senderId', 'senderName', 'senderRole', 'text', 'messageType', 'createdAt', 'updatedAt']) &&
              isValidId(data.channelId) &&
              isValidId(data.senderId) &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 60 &&
              data.senderRole in ['CREATOR', 'ADMIN', 'ORGANIZER', 'PARTICIPANT'] &&
              data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
              data.messageType in ['TEXT', 'ANNOUNCEMENT', 'TASK_UPDATE'] &&
-             isValidTimestamp(data.createdAt);
+             isValidTimestamp(data.createdAt) &&
+             (!('updatedAt' in data) || data.updatedAt == null || isValidTimestamp(data.updatedAt));
     }
 
     function isValidNotification(data) {
       return data.keys().hasAll(['title', 'body', 'notificationType', 'targetScope', 'targetRole', 'senderId', 'senderName', 'createdAt']) &&
-             data.keys().hasOnly(['title', 'body', 'notificationType', 'targetScope', 'targetRole', 'targetChannelId', 'targetChannelName', 'targetEventId', 'senderId', 'senderName', 'scheduledForEpochMs', 'createdAt']) &&
+             data.keys().hasOnly(['title', 'body', 'notificationType', 'targetScope', 'targetRole', 'targetChannelId', 'targetChannelName', 'targetEventId', 'senderId', 'senderName', 'scheduledForEpochMs', 'approvalStatus', 'createdAt', 'updatedAt']) &&
              data.title is string && data.title.size() >= 2 && data.title.size() <= 100 &&
              data.body is string && data.body.size() >= 2 && data.body.size() <= 600 &&
              data.notificationType in ['ANNOUNCEMENT', 'TASK_UPDATE', 'DEADLINE_REMINDER'] &&
@@ -242,7 +243,9 @@ service cloud.firestore {
              isValidId(data.senderId) &&
              data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 60 &&
              (!('scheduledForEpochMs' in data) || data.scheduledForEpochMs == null || (data.scheduledForEpochMs is int && data.scheduledForEpochMs > 0)) &&
-             isValidTimestamp(data.createdAt);
+             (!('approvalStatus' in data) || data.approvalStatus in ['PENDING', 'APPROVED']) &&
+             isValidTimestamp(data.createdAt) &&
+             (!('updatedAt' in data) || data.updatedAt == null || isValidTimestamp(data.updatedAt));
     }
 
     // --- Collection Rules ---
@@ -288,16 +291,20 @@ service cloud.firestore {
       allow create: if isSignedIn() && isValidCodeId(code) &&
                        isValidGroupCode(incoming()) &&
                        incoming().createdBy == request.auth.uid &&
-                       existsAfter(/databases/$(database)/documents/groups/$(incoming().groupId));
+                       existsAfter(/databases/$(database)/documents/groups/$(incoming().groupId)) && (
+                         getAfter(/databases/$(database)/documents/groups/$(incoming().groupId)).data.ownerId == request.auth.uid ||
+                         isGroupAdminOrCreator(incoming().groupId) ||
+                         isGlobalAdmin()
+                       );
       allow update: if isSignedIn() && isValidCodeId(code) &&
                        isValidGroupCode(incoming()) &&
-                       (isGroupCreator(existing().groupId) || isGlobalAdmin()) &&
+                       (isGroupAdminOrCreator(existing().groupId) || isGlobalAdmin()) &&
                        incoming().groupId == existing().groupId &&
                        incoming().createdBy == existing().createdBy &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['groupName', 'active', 'updatedAt']);
       allow delete: if isSignedIn() && isValidCodeId(code) &&
-                       (isGroupCreator(existing().groupId) || isGlobalAdmin());
+                       (isGroupAdminOrCreator(existing().groupId) || isGlobalAdmin());
     }
 
     match /groups/{groupId} {
@@ -309,7 +316,7 @@ service cloud.firestore {
                        incoming().ownerId == request.auth.uid;
       allow update: if isSignedIn() && isValidId(groupId) &&
                        isValidGroup(incoming()) &&
-                       (isGroupCreator(groupId) || isGlobalAdmin()) &&
+                       (isGroupAdminOrCreator(groupId) || isGlobalAdmin()) &&
                        incoming().ownerId == existing().ownerId &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'groupCode', 'updatedAt']);
@@ -446,26 +453,72 @@ service cloud.firestore {
                            incoming().senderId == request.auth.uid &&
                            (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId))) &&
                            (incoming().messageType == 'TEXT' || isGroupOrganizerOrHigher(groupId) || isGlobalAdmin());
-          allow update: if false;
+          allow update: if isSignedIn() && isValidId(messageId) &&
+                           isValidMessage(incoming()) &&
+                           incoming().channelId == existing().channelId &&
+                           incoming().senderId == existing().senderId &&
+                           incoming().senderName == existing().senderName &&
+                           incoming().senderRole == existing().senderRole &&
+                           incoming().messageType == existing().messageType &&
+                           incoming().createdAt == existing().createdAt &&
+                           (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId))) &&
+                           (existing().senderId == request.auth.uid || isGroupAdminOrCreator(groupId) || isGlobalAdmin()) &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['text', 'updatedAt']);
           allow delete: if isSignedIn() && isValidId(messageId) &&
-                           (existing().senderId == request.auth.uid || isGroupAdminOrCreator(groupId) || isGlobalAdmin());
+                           (isGroupAdminOrCreator(groupId) || isGlobalAdmin());
         }
       }
 
       match /notifications/{notificationId} {
-        allow get: if isSignedIn() && isValidId(notificationId) &&
-                      (isGlobalAdmin() || (isGroupMember(groupId) && canAccessNotification(groupId, existing().targetRole)));
-        allow list: if isSignedIn() &&
-                       (isGlobalAdmin() || (isGroupMember(groupId) && canAccessNotification(groupId, resource.data.targetRole)));
+        allow get: if isSignedIn() && isValidId(notificationId) && (
+                      isGlobalAdmin() ||
+                      (isGroupMember(groupId) && (
+                        canAccessNotification(groupId, existing().targetRole) ||
+                        existing().senderId == request.auth.uid
+                      ))
+                   );
+        allow list: if isSignedIn() && (
+                       isGlobalAdmin() ||
+                       (isGroupMember(groupId) && (
+                         canAccessNotification(groupId, resource.data.targetRole) ||
+                         resource.data.senderId == request.auth.uid
+                       ))
+                    );
         allow create: if isSignedIn() && isValidId(notificationId) &&
                          isValidNotification(incoming()) &&
                          incoming().senderId == request.auth.uid && (
-                           (incoming().notificationType == 'ANNOUNCEMENT' && (isGroupAdminOrCreator(groupId) || isGlobalAdmin())) ||
-                           (incoming().notificationType in ['TASK_UPDATE', 'DEADLINE_REMINDER'] && (isGroupOrganizerOrHigher(groupId) || isGlobalAdmin()))
+                           (isGroupAdminOrCreator(groupId) || isGlobalAdmin()) ||
+                           (incoming().notificationType in ['TASK_UPDATE', 'DEADLINE_REMINDER'] &&
+                            isGroupOrganizerOrHigher(groupId) &&
+                            (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'APPROVED')) ||
+                           (isGroupMember(groupId) &&
+                            incoming().notificationType == 'ANNOUNCEMENT' &&
+                            incoming().targetScope == 'ALL' &&
+                            incoming().targetRole == 'ADMIN' &&
+                            ('approvalStatus' in incoming()) &&
+                            incoming().approvalStatus == 'PENDING')
                          );
-        allow update: if false;
+        allow update: if isSignedIn() && isValidId(notificationId) &&
+                         isValidNotification(incoming()) &&
+                         incoming().senderId == existing().senderId &&
+                         incoming().senderName == existing().senderName &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'body', 'notificationType', 'targetScope', 'targetRole', 'targetChannelId', 'targetChannelName', 'targetEventId', 'scheduledForEpochMs', 'approvalStatus', 'updatedAt']) && (
+                           (isGroupAdminOrCreator(groupId) || isGlobalAdmin()) ||
+                           (existing().notificationType in ['TASK_UPDATE', 'DEADLINE_REMINDER'] &&
+                            incoming().notificationType in ['TASK_UPDATE', 'DEADLINE_REMINDER'] &&
+                            (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'APPROVED') &&
+                            isGroupOrganizerOrHigher(groupId)) ||
+                           (isGroupMember(groupId) &&
+                            existing().senderId == request.auth.uid &&
+                            ('approvalStatus' in existing()) && existing().approvalStatus == 'PENDING' &&
+                            ('approvalStatus' in incoming()) && incoming().approvalStatus == 'PENDING' &&
+                            incoming().notificationType == 'ANNOUNCEMENT' &&
+                            incoming().targetScope == 'ALL' &&
+                            incoming().targetRole == 'ADMIN')
+                         );
         allow delete: if isSignedIn() && isValidId(notificationId) &&
-                         (isGroupAdminOrCreator(groupId) || existing().senderId == request.auth.uid || isGlobalAdmin());
+                         (isGroupAdminOrCreator(groupId) || isGlobalAdmin());
       }
     }
   }

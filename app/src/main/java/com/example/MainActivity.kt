@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ExitToApp
 import androidx.compose.material.icons.rounded.AdminPanelSettings
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Forum
@@ -66,6 +67,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.ai.RallyAiViewModel
+import com.example.ai.configureAppCheck
 import com.example.auth.attemptAutoSignIn
 import com.example.auth.authStateFlow
 import com.example.auth.onGoogleSignInClicked
@@ -74,6 +77,7 @@ import com.example.data.remote.RallyHubRepository
 import com.example.notifications.RallyNotificationHelper
 import com.example.ui.components.RoleBadge
 import com.example.ui.screens.AdminPanelScreen
+import com.example.ui.screens.AiCoordinatorBottomSheet
 import com.example.ui.screens.AuthAndJoinScreen
 import com.example.ui.screens.CalendarScreen
 import com.example.ui.screens.ChatsScreen
@@ -104,6 +108,8 @@ private enum class HubTab(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Configure Firebase App Check before UI, ViewModels, or Firebase operations.
+        configureAppCheck(this, intent)
         enableEdgeToEdge()
         RallyNotificationHelper.ensureChannels(this)
         setContent {
@@ -268,6 +274,8 @@ private fun RallyWorkspaceScaffold(
     onRequestAdminSignIn: (() -> Unit)? = null
 ) {
     var selectedTab by rememberSaveable { mutableStateOf(HubTab.DASHBOARD) }
+    var showAiSheet by rememberSaveable { mutableStateOf(false) }
+    val aiViewModel: RallyAiViewModel = viewModel()
     val snackbarHostState = remember { SnackbarHostState() }
 
     val visibleTabs = remember(uiState.currentRole, uiState.isCloudMode) {
@@ -314,6 +322,12 @@ private fun RallyWorkspaceScaffold(
                         }
                     },
                     actions = {
+                        IconButton(
+                            onClick = { showAiSheet = true },
+                            modifier = Modifier.testTag("open_ai_coordinator_button")
+                        ) {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = "Open Gemini AI Coordinator")
+                        }
                         IconButton(
                             onClick = onSwitchOrLeave,
                             modifier = Modifier.testTag("switch_group_button")
@@ -389,6 +403,7 @@ private fun RallyWorkspaceScaffold(
                                 selectedTab = HubTab.CALENDAR
                             },
                             onOpenNotifications = { selectedTab = HubTab.ALERTS },
+                            onOpenAiCoordinator = { showAiSheet = true },
                             onRequestAdminSignIn = onRequestAdminSignIn,
                             onCopiedCode = { /* clipboard handles copy; snackbar optional */ }
                         )
@@ -413,5 +428,14 @@ private fun RallyWorkspaceScaffold(
                 }
             }
         }
+    }
+
+    if (showAiSheet) {
+        AiCoordinatorBottomSheet(
+            aiViewModel = aiViewModel,
+            workspaceState = uiState,
+            workspaceActions = actions,
+            onDismiss = { showAiSheet = false }
+        )
     }
 }

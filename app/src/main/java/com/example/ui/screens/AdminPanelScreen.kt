@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Campaign
-import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.ManageAccounts
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Button
@@ -71,6 +70,8 @@ fun AdminPanelScreen(
     val events = (uiState.eventsState as? UiState.Success)?.data.orEmpty()
     val isCreator = uiState.currentRole.isCreator
 
+    var nameInput by remember(group?.name) { mutableStateOf(group?.name.orEmpty()) }
+    var descriptionInput by remember(group?.description) { mutableStateOf(group?.description.orEmpty()) }
     var newCodeInput by remember(group?.groupCode) { mutableStateOf(group?.groupCode.orEmpty()) }
     var searchQuery by remember { mutableStateOf("") }
     var roleFilter by remember { mutableStateOf<MemberRole?>(null) }
@@ -106,9 +107,9 @@ fun AdminPanelScreen(
                         Text("Admin Command Panel", style = MaterialTheme.typography.headlineSmall)
                         Text(
                             text = if (isCreator)
-                                "Group Creator: Full control over admins, permissions, and group code."
+                                "Group Creator: Full control over admins, group settings, and permissions."
                             else
-                                "Admin: Can promote members & create admins. Only Creator can demote admins or change the master code.",
+                                "Admin: Can edit group details & codes, create admins, and approve/delete posts. Only Creator can demote existing admins.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -117,7 +118,7 @@ fun AdminPanelScreen(
                 }
             }
 
-            // Group Code Management Card
+            // Group Details & Invite Code Management Card (Editable by Admin & Creator)
             if (group != null) {
                 item {
                     Surface(
@@ -138,48 +139,61 @@ fun AdminPanelScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("Group Invite Code", style = MaterialTheme.typography.titleLarge)
+                                Text("Group Settings & Invite Code", style = MaterialTheme.typography.titleLarge)
                                 GroupCodePill(code = group.groupCode, onCopied = onCopiedCode)
                             }
-                            if (isCreator) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.fillMaxWidth()
+                            OutlinedTextField(
+                                value = nameInput,
+                                onValueChange = { nameInput = it.take(80) },
+                                label = { Text("Group Name") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("edit_group_name_input")
+                            )
+                            OutlinedTextField(
+                                value = descriptionInput,
+                                onValueChange = { descriptionInput = it.take(500) },
+                                label = { Text("Group Description") },
+                                maxLines = 3,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("edit_group_desc_input")
+                            )
+                            Button(
+                                onClick = { actions.updateGroupDetails(nameInput, descriptionInput) },
+                                enabled = !uiState.isBusy && nameInput.trim().length >= 2 &&
+                                    (nameInput.trim() != group.name || descriptionInput.trim() != group.description),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("save_group_details_button")
+                            ) {
+                                Text("Save Group Details")
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                OutlinedTextField(
+                                    value = newCodeInput,
+                                    onValueChange = { newCodeInput = it.uppercase().take(24) },
+                                    label = { Text("Custom Group Code") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("edit_group_code_input")
+                                )
+                                Button(
+                                    onClick = { actions.updateGroupCode(newCodeInput) },
+                                    enabled = !uiState.isBusy && newCodeInput.trim().length >= 4 && newCodeInput != group.groupCode,
+                                    modifier = Modifier
+                                        .height(54.dp)
+                                        .testTag("save_group_code_button")
                                 ) {
-                                    OutlinedTextField(
-                                        value = newCodeInput,
-                                        onValueChange = { newCodeInput = it.uppercase().take(24) },
-                                        label = { Text("Custom Group Code") },
-                                        singleLine = true,
-                                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("edit_group_code_input")
-                                    )
-                                    Button(
-                                        onClick = { actions.updateGroupCode(newCodeInput) },
-                                        enabled = !uiState.isBusy && newCodeInput.trim().length >= 4 && newCodeInput != group.groupCode,
-                                        modifier = Modifier
-                                            .height(54.dp)
-                                            .testTag("save_group_code_button")
-                                    ) {
-                                        Text("Update")
-                                    }
-                                }
-                            } else {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        Icons.Rounded.Lock,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        text = "Only the Group Creator can edit the master group code.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                    Text("Update Code")
                                 }
                             }
                         }
@@ -304,12 +318,13 @@ fun AdminPanelScreen(
 
     if (showBroadcastDialog) {
         NotificationComposerDialog(
-            canSendGlobalAnnouncement = true,
+            currentRole = uiState.currentRole,
+            initialNotification = null,
             channels = channels,
             events = events,
             onDismiss = { showBroadcastDialog = false },
-            onSend = { title, body, type, scope, role, chId, chName, evtId ->
-                actions.sendNotification(title, body, type, scope, role, chId, chName, evtId)
+            onSend = { title, body, type, scope, role, chId, chName, evtId, scheduledMs ->
+                actions.sendNotification(title, body, type, scope, role, chId, chName, evtId, scheduledMs)
                 showBroadcastDialog = false
             }
         )

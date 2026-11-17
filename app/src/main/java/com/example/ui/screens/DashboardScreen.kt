@@ -19,22 +19,34 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Campaign
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +56,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.model.ApprovalStatus
 import com.example.data.model.EventTask
 import com.example.data.model.HubNotification
 import com.example.data.model.NotificationType
@@ -51,7 +64,10 @@ import com.example.data.model.RallyEvent
 import com.example.ui.components.GroupCodePill
 import com.example.ui.components.MetricStatTile
 import com.example.ui.components.RallyDateFormat
+import com.example.ui.components.ReminderEditorDialog
 import com.example.ui.components.RoleBadge
+import com.example.ui.theme.AmberContainer
+import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CobaltPrimary
 import com.example.ui.theme.CobaltPrimaryDark
 import com.example.ui.theme.CoralSecondary
@@ -66,6 +82,7 @@ fun DashboardScreen(
     actions: RallyWorkspaceActions,
     onOpenEvent: (String) -> Unit,
     onOpenNotifications: () -> Unit,
+    onOpenAiCoordinator: () -> Unit,
     onRequestAdminSignIn: (() -> Unit)? = null,
     onCopiedCode: () -> Unit,
     modifier: Modifier = Modifier
@@ -73,10 +90,20 @@ fun DashboardScreen(
     val group = uiState.activeGroup
     val events = (uiState.eventsState as? UiState.Success)?.data.orEmpty()
     val notifications = (uiState.notificationsState as? UiState.Success)?.data.orEmpty()
-    val latestAnnouncement = notifications.firstOrNull { it.parsedType() == NotificationType.ANNOUNCEMENT }
-        ?: notifications.firstOrNull()
+    val latestAnnouncement = notifications.firstOrNull {
+        it.parsedType() == NotificationType.ANNOUNCEMENT && it.parsedApprovalStatus() == ApprovalStatus.APPROVED
+    } ?: notifications.firstOrNull { it.parsedApprovalStatus() == ApprovalStatus.APPROVED }
+
+    val pendingCount = if (uiState.currentRole.canAccessAdminPanel) {
+        notifications.count { it.parsedApprovalStatus() == ApprovalStatus.PENDING }
+    } else 0
+
     val allTasks = uiState.allTasksByEvent.values.flatten()
     val openTasks = allTasks.filter { it.assignedCount < it.capacity }.take(4)
+
+    var reminderEvent by remember { mutableStateOf<RallyEvent?>(null) }
+    var deleteSpotlightNotif by remember { mutableStateOf<HubNotification?>(null) }
+    var showEditNameDialog by remember { mutableStateOf(false) }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -139,6 +166,37 @@ fun DashboardScreen(
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = "Signed in as ${uiState.currentUserName}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color.White.copy(alpha = 0.92f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                IconButton(
+                                    onClick = { showEditNameDialog = true },
+                                    modifier = Modifier.testTag("edit_display_name_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Edit,
+                                        contentDescription = "Edit display name",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             if (group != null) {
@@ -151,6 +209,96 @@ fun DashboardScreen(
                                 ) {
                                     Text("Admin Sign-In")
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Gemini AI Coordinator Callout Card
+            item {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    shape = MaterialTheme.shapes.large,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenAiCoordinator)
+                        .testTag("dashboard_ai_coordinator_card")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.padding(14.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AutoAwesome,
+                                contentDescription = null,
+                                tint = CobaltPrimary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Gemini AI Coordinator",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Summarize events, spot open shifts, or draft announcements with Gemini.",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = onOpenAiCoordinator,
+                            modifier = Modifier.testTag("dashboard_open_ai_button")
+                        ) {
+                            Text("Ask AI")
+                        }
+                    }
+                }
+            }
+
+            // Admin Pending Approval Banner
+            if (pendingCount > 0) {
+                item {
+                    Surface(
+                        color = AmberContainer,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenNotifications)
+                            .testTag("dashboard_pending_approval_banner")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.padding(14.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.HourglassTop,
+                                    contentDescription = null,
+                                    tint = AmberWarning
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = "$pendingCount member announcement(s) waiting for Admin approval",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            TextButton(onClick = onOpenNotifications) {
+                                Text("Review")
                             }
                         }
                     }
@@ -184,11 +332,13 @@ fun DashboardScreen(
                 }
             }
 
-            // Latest Pinned Announcement
+            // Latest Pinned Approved Announcement
             if (latestAnnouncement != null) {
                 item {
                     AnnouncementSpotlightCard(
                         notification = latestAnnouncement,
+                        canDelete = uiState.currentRole.canAccessAdminPanel,
+                        onDelete = { deleteSpotlightNotif = latestAnnouncement },
                         onClick = onOpenNotifications
                     )
                 }
@@ -217,14 +367,8 @@ fun DashboardScreen(
                         event = event,
                         tasks = uiState.allTasksByEvent[event.id].orEmpty(),
                         isReminded = event.id in uiState.remindedItemIds,
-                        onRemindClick = {
-                            actions.toggleReminder(
-                                itemId = event.id,
-                                title = "Event Starting: ${event.title}",
-                                body = "Location: ${event.location} (${RallyDateFormat.formatTime(event.startEpochMs)})",
-                                triggerAtEpochMs = event.startEpochMs - 15 * 60_000L
-                            )
-                        },
+                        remindedAtMs = uiState.remindedTimes[event.id],
+                        onRemindClick = { reminderEvent = event },
                         onClick = { onOpenEvent(event.id) }
                     )
                 }
@@ -253,11 +397,93 @@ fun DashboardScreen(
             }
         }
     }
+
+    reminderEvent?.let { target ->
+        ReminderEditorDialog(
+            itemTitle = target.title,
+            targetEpochMs = target.startEpochMs,
+            currentReminderEpochMs = uiState.remindedTimes[target.id],
+            onDismiss = { reminderEvent = null },
+            onSave = { triggerMs ->
+                actions.scheduleOrUpdateReminder(
+                    itemId = target.id,
+                    title = "Event Starting: ${target.title}",
+                    body = "Location: ${target.location} (${RallyDateFormat.formatTime(target.startEpochMs)})",
+                    triggerAtEpochMs = triggerMs
+                )
+                reminderEvent = null
+            },
+            onRemove = {
+                actions.removeReminder(target.id)
+                reminderEvent = null
+            }
+        )
+    }
+
+    deleteSpotlightNotif?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteSpotlightNotif = null },
+            title = { Text("Delete Announcement") },
+            text = { Text("Delete \"${target.title}\"? Only Admins can delete announcements.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        actions.deleteNotification(target.id)
+                        deleteSpotlightNotif = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.testTag("confirm_delete_spotlight_button")
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteSpotlightNotif = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showEditNameDialog) {
+        var nameInput by remember(uiState.currentUserName) { mutableStateOf(uiState.currentUserName) }
+        AlertDialog(
+            onDismissRequest = { showEditNameDialog = false },
+            title = { Text("Edit Your Display Name") },
+            text = {
+                OutlinedTextField(
+                    value = nameInput,
+                    onValueChange = { nameInput = it.take(50) },
+                    label = { Text("Display Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("edit_display_name_input")
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        actions.updateDisplayName(nameInput)
+                        showEditNameDialog = false
+                    },
+                    enabled = nameInput.trim().length >= 2,
+                    modifier = Modifier.testTag("confirm_display_name_button")
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditNameDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 @Composable
 private fun AnnouncementSpotlightCard(
     notification: HubNotification,
+    canDelete: Boolean,
+    onDelete: () -> Unit,
     onClick: () -> Unit
 ) {
     Surface(
@@ -298,6 +524,18 @@ private fun AnnouncementSpotlightCard(
                     style = MaterialTheme.typography.labelMedium
                 )
             }
+            if (canDelete) {
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.testTag("delete_spotlight_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.DeleteOutline,
+                        contentDescription = "Delete announcement",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
     }
 }
@@ -307,6 +545,7 @@ private fun UpcomingEventCard(
     event: RallyEvent,
     tasks: List<EventTask>,
     isReminded: Boolean,
+    remindedAtMs: Long?,
     onRemindClick: () -> Unit,
     onClick: () -> Unit
 ) {
@@ -372,6 +611,14 @@ private fun UpcomingEventCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                if (remindedAtMs != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Reminder: ${RallyDateFormat.formatDateTime(remindedAtMs)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CoralSecondary
+                    )
+                }
                 if (tasks.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -387,7 +634,7 @@ private fun UpcomingEventCard(
             ) {
                 Icon(
                     imageVector = if (isReminded) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsNone,
-                    contentDescription = "Toggle event reminder",
+                    contentDescription = "Set or edit event reminder",
                     tint = if (isReminded) CoralSecondary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }

@@ -83,6 +83,8 @@ data class LocalNotificationEntity(
     val targetScope: String,
     val targetChannelName: String?,
     val senderName: String,
+    val scheduledForEpochMs: Long? = null,
+    val approvalStatus: String = "APPROVED",
     val createdAtMs: Long
 )
 
@@ -121,11 +123,17 @@ interface LocalRallyDao {
     @Query("SELECT * FROM local_channels WHERE groupCode = :code")
     fun observeChannels(code: String): Flow<List<LocalChannelEntity>>
 
+    @Query("SELECT * FROM local_channels WHERE id = :channelId LIMIT 1")
+    suspend fun getChannel(channelId: String): LocalChannelEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChannels(channels: List<LocalChannelEntity>)
 
     @Query("SELECT * FROM local_messages WHERE groupCode = :code AND channelId = :channelId ORDER BY createdAtMs ASC")
     fun observeMessages(code: String, channelId: String): Flow<List<LocalMessageEntity>>
+
+    @Query("SELECT * FROM local_messages WHERE id = :messageId LIMIT 1")
+    suspend fun getMessage(messageId: String): LocalMessageEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessages(messages: List<LocalMessageEntity>)
@@ -146,7 +154,7 @@ interface LocalRallyDao {
         LocalMessageEntity::class,
         LocalNotificationEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class LocalRallyDatabase : RoomDatabase() {

@@ -177,10 +177,9 @@ test("Group Creator can create group + custom groupCode + CREATOR member atomica
   // Exact lookup by code succeeds
   await assertSucceeds(partDb.collection("groupCodes").doc(GROUP_CODE).get());
 
-  // Admin cannot update group metadata (only creator has full control)
-  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  // Participant cannot update group metadata
   await assertFails(
-    adminDb.collection("groups").doc(GROUP_ID).update({
+    partDb.collection("groups").doc(GROUP_ID).update({
       name: "Hijacked Name",
       updatedAt: pastTime(1000),
     })
@@ -190,6 +189,14 @@ test("Group Creator can create group + custom groupCode + CREATOR member atomica
     creatorDb.collection("groups").doc(GROUP_ID).update({
       name: "RallyHub Launch Updated",
       updatedAt: pastTime(1000),
+    })
+  );
+  // Admin can also edit group metadata & groupCode, but cannot delete the group
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  await assertFails(
+    adminDb.collection("groups").doc(GROUP_ID).update({
+      name: "Unauthorized Admin Update Before Join",
+      updatedAt: pastTime(900),
     })
   );
 });
@@ -482,7 +489,7 @@ test("Targeted notifications enforce Admin broadcast vs Organizer task update ru
   const orgDb = testEnv.authenticatedContext(ORGANIZER_UID).firestore();
   const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
 
-  // Organizer CANNOT send global ANNOUNCEMENT
+  // Organizer CANNOT send an immediately APPROVED global ANNOUNCEMENT (must be PENDING + ADMIN target)
   await assertFails(
     orgDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n1").set({
       title: "Global Alert",
@@ -490,6 +497,7 @@ test("Targeted notifications enforce Admin broadcast vs Organizer task update ru
       notificationType: "ANNOUNCEMENT",
       targetScope: "ALL",
       targetRole: "ALL",
+      approvalStatus: "APPROVED",
       senderId: ORGANIZER_UID,
       senderName: "Omar",
       createdAt: pastTime(1000),
@@ -548,4 +556,352 @@ test("Email spoofing guard: unverified admin email token is rejected on /admins"
   }).firestore();
   await assertSucceeds(verifiedDb.collection("admins").get());
 });
+
+test("Only Admin or Creator can delete messages and announcements/notifications", async () => {
+  await seedBaseGroup();
+  const ts = pastTime(5000);
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const grp = ctx.firestore().collection("groups").doc(GROUP_ID);
+    await grp.collection("channels").doc(CH_ALL_ID).set({
+      name: "General",
+      description: "Everyone",
+      accessLevel: "ALL",
+      createdBy: CREATOR_UID,
+      messageCount: 2,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await grp.collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_part").set({
+      channelId: CH_ALL_ID,
+      senderId: PARTICIPANT_UID,
+      senderName: "Pat Participant",
+      senderRole: "PARTICIPANT",
+      text: "Participant message",
+      messageType: "TEXT",
+      createdAt: ts,
+    });
+    await grp.collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_org").set({
+      channelId: CH_ALL_ID,
+      senderId: ORGANIZER_UID,
+      senderName: "Omar Organizer",
+      senderRole: "ORGANIZER",
+      text: "Organizer message",
+      messageType: "TEXT",
+      createdAt: ts,
+    });
+    await grp.collection("notifications").doc("n_org").set({
+      title: "Task Update",
+      body: "Updated shift",
+      notificationType: "TASK_UPDATE",
+      targetScope: "ALL",
+      targetRole: "ALL",
+      senderId: ORGANIZER_UID,
+      senderName: "Omar Organizer",
+      createdAt: ts,
+    });
+    await grp.collection("notifications").doc("n_admin").set({
+      title: "Announcement",
+      body: "Main stage opens at 9 AM",
+      notificationType: "ANNOUNCEMENT",
+      targetScope: "ALL",
+      targetRole: "ALL",
+      senderId: ADMIN_UID,
+      senderName: "Alex Admin",
+      createdAt: ts,
+    });
+  });
+
+  const partDb = testEnv.authenticatedContext(PARTICIPANT_UID).firestore();
+  const orgDb = testEnv.authenticatedContext(ORGANIZER_UID).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const creatorDb = testEnv.authenticatedContext(CREATOR_UID).firestore();
+
+  // Participant & Organizer CANNOT delete even their own messages or notifications
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_part").delete()
+  );
+  await assertFails(
+    orgDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_org").delete()
+  );
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_admin").delete()
+  );
+  await assertFails(
+    orgDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_org").delete()
+  );
+
+  // Admin CAN delete messages and announcements/notifications
+  await assertSucceeds(
+    adminDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_part").delete()
+  );
+  await assertSucceeds(
+    adminDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_org").delete()
+  );
+
+  // Creator CAN also delete messages and announcements/notifications
+  await assertSucceeds(
+    creatorDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_org").delete()
+  );
+  await assertSucceeds(
+    creatorDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_admin").delete()
+  );
+});
+
+test("Admin and Creator can edit groups and group codes while Organizer and Participant cannot", async () => {
+  await seedBaseGroup();
+  const partDb = testEnv.authenticatedContext(PARTICIPANT_UID).firestore();
+  const orgDb = testEnv.authenticatedContext(ORGANIZER_UID).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const creatorDb = testEnv.authenticatedContext(CREATOR_UID).firestore();
+
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).update({
+      name: "Participant Edit",
+      updatedAt: pastTime(1000),
+    })
+  );
+  await assertFails(
+    orgDb.collection("groups").doc(GROUP_ID).update({
+      name: "Organizer Edit",
+      updatedAt: pastTime(1000),
+    })
+  );
+
+  // Admin CAN edit group name, description, and code
+  await assertSucceeds(
+    adminDb.collection("groups").doc(GROUP_ID).update({
+      name: "Summit Edited By Admin",
+      description: "Updated by admin",
+      groupCode: "ADMIN26",
+      updatedAt: pastTime(900),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("groupCodes").doc("ADMIN26").set({
+      groupId: GROUP_ID,
+      groupName: "Summit Edited By Admin",
+      createdBy: ADMIN_UID,
+      active: true,
+      createdAt: pastTime(900),
+      updatedAt: pastTime(900),
+    })
+  );
+
+  // Admin CANNOT delete the group itself (Creator-only)
+  await assertFails(adminDb.collection("groups").doc(GROUP_ID).delete());
+
+  // Creator CAN edit and delete
+  await assertSucceeds(
+    creatorDb.collection("groups").doc(GROUP_ID).update({
+      name: "Summit Final",
+      updatedAt: pastTime(500),
+    })
+  );
+});
+
+test("Editing messages and announcements/notifications enforces ownership and RBAC", async () => {
+  await seedBaseGroup();
+  const ts = pastTime(5000);
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const grp = ctx.firestore().collection("groups").doc(GROUP_ID);
+    await grp.collection("channels").doc(CH_ALL_ID).set({
+      name: "General",
+      description: "Everyone",
+      accessLevel: "ALL",
+      createdBy: CREATOR_UID,
+      messageCount: 1,
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await grp.collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_part").set({
+      channelId: CH_ALL_ID,
+      senderId: PARTICIPANT_UID,
+      senderName: "Pat Participant",
+      senderRole: "PARTICIPANT",
+      text: "Original text",
+      messageType: "TEXT",
+      createdAt: ts,
+    });
+    await grp.collection("notifications").doc("n_org").set({
+      title: "Shift Update",
+      body: "Starts at 2pm",
+      notificationType: "TASK_UPDATE",
+      targetScope: "ALL",
+      targetRole: "ALL",
+      senderId: ORGANIZER_UID,
+      senderName: "Omar Organizer",
+      createdAt: ts,
+    });
+    await grp.collection("notifications").doc("n_admin").set({
+      title: "Admin Announcement",
+      body: "Original body",
+      notificationType: "ANNOUNCEMENT",
+      targetScope: "ALL",
+      targetRole: "ALL",
+      senderId: ADMIN_UID,
+      senderName: "Alex Admin",
+      createdAt: ts,
+    });
+  });
+
+  const partDb = testEnv.authenticatedContext(PARTICIPANT_UID).firestore();
+  const orgDb = testEnv.authenticatedContext(ORGANIZER_UID).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+
+  // Sender can edit own message text; Organizer cannot edit someone else's message; Admin can edit any message
+  await assertSucceeds(
+    partDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_part").update({
+      text: "Edited by Pat",
+      updatedAt: pastTime(1000),
+    })
+  );
+  await assertFails(
+    orgDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_part").update({
+      text: "Edited by Org",
+      updatedAt: pastTime(900),
+    })
+  );
+  await assertSucceeds(
+    adminDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID).collection("messages").doc("m_part").update({
+      text: "Moderated by Admin",
+      updatedAt: pastTime(800),
+    })
+  );
+
+  // Organizer can edit TASK_UPDATE title/body/scheduledForEpochMs, cannot edit ANNOUNCEMENT
+  await assertSucceeds(
+    orgDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_org").update({
+      title: "Shift Time Moved",
+      body: "Starts at 3pm",
+      scheduledForEpochMs: Date.now() + 7200000,
+      updatedAt: pastTime(700),
+    })
+  );
+  await assertFails(
+    orgDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_admin").update({
+      body: "Hacked announcement",
+      updatedAt: pastTime(600),
+    })
+  );
+
+  // Participant cannot edit notifications
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_org").update({
+      body: "Nope",
+      updatedAt: pastTime(500),
+    })
+  );
+
+  // Admin can edit announcements
+  await assertSucceeds(
+    adminDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_admin").update({
+      title: "Updated Announcement",
+      body: "New date and time",
+      scheduledForEpochMs: Date.now() + 3600000,
+      updatedAt: pastTime(400),
+    })
+  );
+});
+
+test("Regular members can message and submit PENDING announcements, but only Admin can approve them to post", async () => {
+  await seedBaseGroup();
+  const partDb = testEnv.authenticatedContext(PARTICIPANT_UID).firestore();
+  const orgDb = testEnv.authenticatedContext(ORGANIZER_UID).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+
+  // Participant CANNOT create channels or events or TASK_UPDATE alerts
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).collection("channels").doc("ch_part").set({
+      name: "Member Channel",
+      description: "Desc",
+      accessLevel: "ALL",
+      createdBy: PARTICIPANT_UID,
+      messageCount: 0,
+      createdAt: pastTime(2000),
+      updatedAt: pastTime(2000),
+    })
+  );
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_task_fail").set({
+      title: "Task Alert",
+      body: "Unauthorized task update",
+      notificationType: "TASK_UPDATE",
+      targetScope: "ALL",
+      targetRole: "ALL",
+      approvalStatus: "APPROVED",
+      senderId: PARTICIPANT_UID,
+      senderName: "Pat",
+      createdAt: pastTime(2000),
+    })
+  );
+
+  // Participant CANNOT post an APPROVED announcement directly
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_ann_direct").set({
+      title: "Direct Announcement",
+      body: "Should fail",
+      notificationType: "ANNOUNCEMENT",
+      targetScope: "ALL",
+      targetRole: "ALL",
+      approvalStatus: "APPROVED",
+      senderId: PARTICIPANT_UID,
+      senderName: "Pat",
+      createdAt: pastTime(2000),
+    })
+  );
+
+  // Participant CAN submit an ANNOUNCEMENT as PENDING (gated to ADMIN queue)
+  await assertSucceeds(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_ann_pending").set({
+      title: "Carpool Leaving Early",
+      body: "Van B leaves from Gate 2 at 5pm",
+      notificationType: "ANNOUNCEMENT",
+      targetScope: "ALL",
+      targetRole: "ADMIN",
+      approvalStatus: "PENDING",
+      senderId: PARTICIPANT_UID,
+      senderName: "Pat Participant",
+      createdAt: pastTime(1500),
+    })
+  );
+
+  // Author can view own pending submission via senderId query, but Organizer CANNOT see or approve it
+  await assertSucceeds(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").where("senderId", "==", PARTICIPANT_UID).get()
+  );
+  await assertFails(
+    orgDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_ann_pending").get()
+  );
+  await assertFails(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_ann_pending").update({
+      approvalStatus: "APPROVED",
+      targetRole: "ALL",
+      updatedAt: pastTime(1000),
+    })
+  );
+  await assertFails(
+    orgDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_ann_pending").update({
+      approvalStatus: "APPROVED",
+      targetRole: "ALL",
+      updatedAt: pastTime(1000),
+    })
+  );
+
+  // Admin CAN approve and publish it to ALL members
+  await assertSucceeds(
+    adminDb.collection("groups").doc(GROUP_ID).collection("notifications").doc("n_ann_pending").update({
+      approvalStatus: "APPROVED",
+      targetRole: "ALL",
+      updatedAt: pastTime(500),
+    })
+  );
+
+  // Once approved, regular members can read it in the group feed
+  await assertSucceeds(
+    partDb.collection("groups").doc(GROUP_ID).collection("notifications").where("targetRole", "in", ["ALL", "PARTICIPANT"]).get()
+  );
+});
+
+
+
 
