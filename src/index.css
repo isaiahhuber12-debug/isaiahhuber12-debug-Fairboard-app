@@ -1,0 +1,82 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --rally-primary: #1B4DFF;
+  --rally-primary-dark: #1034B8;
+  --rally-primary-container: #E5ECFF;
+  --rally-on-primary-container: #061B6E;
+
+  --rally-secondary: #FF5A36;
+  --rally-secondary-container: #FFE5DF;
+  --rally-on-secondary-container: #6B1605;
+
+  --rally-tertiary: #0F9D76;
+  --rally-tertiary-container: #D6F5EC;
+  --rally-on-tertiary-container: #034231;
+
+  --rally-amber: #D97706;
+  --rally-amber-container: #FEF3C7;
+
+  --rally-bg: #F5F7FB;
+  --rally-surface: #FFFFFF;
+  --rally-surface-variant: #E9EEF7;
+  --rally-on-surface: #111827;
+  --rally-on-surface-variant: #4B5565;
+  --rally-outline: #D0D8E6;
+
+  --rally-error: #DC2626;
+  --rally-error-container: #FEE2E2;
+  --rally-on-error-container: #7F1D1D;
+}
+
+.dark {
+  --rally-primary: #7FA1FF;
+  --rally-primary-dark: #1034B8;
+  --rally-primary-container: #142A73;
+  --rally-on-primary-container: #DDE6FF;
+
+  --rally-secondary: #FF8C73;
+  --rally-secondary-container: #5C1B0D;
+  --rally-on-secondary-container: #FFDAD2;
+
+  --rally-tertiary: #4FD9B2;
+  --rally-tertiary-container: #084B39;
+  --rally-on-tertiary-container: #C5F7E8;
+
+  --rally-amber: #F59E0B;
+  --rally-amber-container: #451A03;
+
+  --rally-bg: #0D1118;
+  --rally-surface: #151B26;
+  --rally-surface-variant: #1F2735;
+  --rally-on-surface: #F1F5F9;
+  --rally-on-surface-variant: #A0AEC0;
+  --rally-outline: #2D3748;
+
+  --rally-error: #F87171;
+  --rally-error-container: #450A0A;
+  --rally-on-error-container: #FECACA;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: var(--rally-bg);
+    color: var(--rally-on-surface);
+    font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: "Space Grotesk", "Plus Jakarta Sans", sans-serif;
+  }
+
+  .font-mono-code {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
