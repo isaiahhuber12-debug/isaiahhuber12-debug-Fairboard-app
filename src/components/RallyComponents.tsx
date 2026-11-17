@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Calendar,
   Check,
@@ -6,8 +6,10 @@ import {
   Copy,
   Shield,
   Trash2,
+  WifiOff,
   X,
 } from 'lucide-react';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import {
   ApprovalStatus,
   type ChatChannel,
@@ -23,9 +25,11 @@ import {
 import {
   applyDateInput,
   applyTimeInput,
+  formatDateTime,
   toDateInputValue,
   toTimeInputValue,
 } from '../lib/dateFormat';
+import { getGroupInitials } from '../lib/groupImages';
 
 export function ModalDialog({
   open,
@@ -116,6 +120,24 @@ export function RoleBadge({ role }: { role: MemberRole }) {
     >
       {showShield && <Shield className="h-3 w-3 shrink-0" />}
       {ROLE_META[role].label}
+    </span>
+  );
+}
+
+export function OfflineStatusBadge({ className = '' }: { className?: string }) {
+  const isOnline = useOnlineStatus();
+  if (isOnline) return null;
+
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-testid="offline_status_indicator"
+      title="You are currently offline. Live updates will resume when reconnected."
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--rally-secondary)]/35 bg-[var(--rally-secondary-container)] px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[var(--rally-on-secondary-container)] ${className}`}
+    >
+      <WifiOff className="h-3.5 w-3.5 shrink-0" />
+      <span>Offline</span>
     </span>
   );
 }
@@ -331,7 +353,7 @@ export function ReminderEditorDialog({
   open,
   itemTitle,
   targetEpochMs,
-  currentReminderEpochMs,
+  currentReminderEpochMsList,
   onClose,
   onSave,
   onRemove,
@@ -339,18 +361,18 @@ export function ReminderEditorDialog({
   open: boolean;
   itemTitle: string;
   targetEpochMs: number;
-  currentReminderEpochMs: number | null;
+  currentReminderEpochMsList: number[];
   onClose: () => void;
   onSave: (triggerAtMs: number) => void;
-  onRemove: () => void;
+  onRemove: (triggerAtMs?: number) => void;
 }) {
   if (!open) return null;
   return (
     <ReminderEditorDialogBody
-      key={`${itemTitle}_${targetEpochMs}_${currentReminderEpochMs ?? 'new'}`}
+      key={`${itemTitle}_${targetEpochMs}`}
       itemTitle={itemTitle}
       targetEpochMs={targetEpochMs}
-      currentReminderEpochMs={currentReminderEpochMs}
+      currentReminderEpochMsList={currentReminderEpochMsList}
       onClose={onClose}
       onSave={onSave}
       onRemove={onRemove}
@@ -361,25 +383,27 @@ export function ReminderEditorDialog({
 function ReminderEditorDialogBody({
   itemTitle,
   targetEpochMs,
-  currentReminderEpochMs,
+  currentReminderEpochMsList,
   onClose,
   onSave,
   onRemove,
 }: {
   itemTitle: string;
   targetEpochMs: number;
-  currentReminderEpochMs: number | null;
+  currentReminderEpochMsList: number[];
   onClose: () => void;
   onSave: (triggerAtMs: number) => void;
-  onRemove: () => void;
+  onRemove: (triggerAtMs?: number) => void;
 }) {
   const [mountNow] = useState(() => Date.now());
-  const [triggerMs, setTriggerMs] = useState<number>(
-    () => currentReminderEpochMs ?? Math.max(mountNow + 60_000, targetEpochMs - 15 * 60_000)
+  const [triggerMs, setTriggerMs] = useState<number>(() =>
+    Math.max(mountNow + 60_000, targetEpochMs - 30 * 60_000)
   );
+  const [addedCount, setAddedCount] = useState(0);
 
   const presets = [
     { mins: 15, label: '15m before' },
+    { mins: 30, label: '30m before' },
     { mins: 60, label: '1h before' },
     { mins: 1440, label: '1d before' },
   ];
@@ -388,43 +412,87 @@ function ReminderEditorDialogBody({
     <ModalDialog
       open
       onClose={onClose}
-      title={currentReminderEpochMs !== null ? 'Edit Reminder Time' : 'Set Reminder Time'}
+      title={currentReminderEpochMsList.length > 0 ? 'Manage Reminders' : 'Set Reminder Times'}
       footer={
-        <div className="flex w-full items-center justify-between gap-2">
+        <div className="flex w-full flex-wrap items-center justify-between gap-2">
           <div>
-            {currentReminderEpochMs !== null && (
+            {currentReminderEpochMsList.length > 0 && (
               <button
                 type="button"
-                onClick={onRemove}
+                onClick={() => onRemove(undefined)}
                 data-testid="remove_reminder_button"
                 className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold text-[var(--rally-error)] hover:bg-[var(--rally-error-container)]/60"
               >
                 <Trash2 className="h-4 w-4" />
-                Remove
+                Clear All
               </button>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={onClose}
               className="rounded-xl px-3.5 py-2 text-sm font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
             >
-              Cancel
+              Done
             </button>
             <button
               type="button"
-              onClick={() => onSave(triggerMs)}
+              onClick={() => {
+                onSave(triggerMs);
+                setAddedCount((c) => c + 1);
+              }}
+              data-testid="save_another_reminder_button"
+              className="rounded-xl border border-[var(--rally-primary)] px-3.5 py-2 text-sm font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50"
+            >
+              Add &amp; Keep Open
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onSave(triggerMs);
+                onClose();
+              }}
               data-testid="save_reminder_button"
               className="rounded-xl bg-[var(--rally-primary)] px-4 py-2 text-sm font-semibold text-white hover:brightness-110"
             >
-              Save Reminder
+              Add Reminder
             </button>
           </div>
         </div>
       }
     >
       <p className="text-sm font-semibold">{itemTitle}</p>
+      {addedCount > 0 && (
+        <div className="rounded-xl bg-[var(--rally-tertiary-container)] px-3 py-2 text-xs font-semibold text-[var(--rally-on-tertiary-container)]">
+          Added {addedCount} reminder{addedCount === 1 ? '' : 's'} — pick another time or click Done.
+        </div>
+      )}
+      {currentReminderEpochMsList.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+            Active Reminders ({currentReminderEpochMsList.length})
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {currentReminderEpochMsList.map((ts) => (
+              <span
+                key={ts}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--rally-secondary-container)] px-2.5 py-1 text-xs font-semibold text-[var(--rally-on-secondary-container)]"
+              >
+                <span>{formatDateTime(ts)}</span>
+                <button
+                  type="button"
+                  onClick={() => onRemove(ts)}
+                  aria-label={`Remove reminder at ${formatDateTime(ts)}`}
+                  className="rounded p-0.5 hover:bg-black/10"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="space-y-1.5">
         <div className="text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
           Quick Offsets
@@ -460,43 +528,57 @@ function ReminderEditorDialogBody({
   );
 }
 
+export interface NotificationComposerPayload {
+  title: string;
+  body: string;
+  type: NotificationType;
+  targetScope: string;
+  targetRole: string;
+  targetChannelId: string | null;
+  targetChannelName: string | null;
+  targetEventId: string | null;
+  scheduledForEpochMs: number | null;
+}
+
 export function NotificationComposerDialog({
   open,
   currentRole,
   initialNotification = null,
+  prefillNotification = null,
   channels,
   events,
+  isBusy = false,
   onClose,
   onSend,
+  onSendAndAnother,
 }: {
   open: boolean;
   currentRole: MemberRole;
   initialNotification?: HubNotification | null;
+  prefillNotification?: HubNotification | null;
   channels: ChatChannel[];
   events: RallyEvent[];
+  isBusy?: boolean;
   onClose: () => void;
-  onSend: (params: {
-    title: string;
-    body: string;
-    type: NotificationType;
-    targetScope: string;
-    targetRole: string;
-    targetChannelId: string | null;
-    targetChannelName: string | null;
-    targetEventId: string | null;
-    scheduledForEpochMs: number | null;
-  }) => void;
+  onSend: (params: NotificationComposerPayload) => void;
+  onSendAndAnother?: (params: NotificationComposerPayload) => Promise<boolean> | boolean;
 }) {
   if (!open) return null;
   return (
     <NotificationComposerDialogBody
-      key={initialNotification?.id ?? 'new_notif'}
+      key={
+        initialNotification?.id ??
+        (prefillNotification ? `dup_${prefillNotification.id}` : 'new_notif')
+      }
       currentRole={currentRole}
       initialNotification={initialNotification}
+      prefillNotification={prefillNotification}
       channels={channels}
       events={events}
+      isBusy={isBusy}
       onClose={onClose}
       onSend={onSend}
+      onSendAndAnother={onSendAndAnother}
     />
   );
 }
@@ -504,28 +586,25 @@ export function NotificationComposerDialog({
 function NotificationComposerDialogBody({
   currentRole,
   initialNotification = null,
+  prefillNotification = null,
   channels,
   events,
+  isBusy = false,
   onClose,
   onSend,
+  onSendAndAnother,
 }: {
   currentRole: MemberRole;
   initialNotification?: HubNotification | null;
+  prefillNotification?: HubNotification | null;
   channels: ChatChannel[];
   events: RallyEvent[];
+  isBusy?: boolean;
   onClose: () => void;
-  onSend: (params: {
-    title: string;
-    body: string;
-    type: NotificationType;
-    targetScope: string;
-    targetRole: string;
-    targetChannelId: string | null;
-    targetChannelName: string | null;
-    targetEventId: string | null;
-    scheduledForEpochMs: number | null;
-  }) => void;
+  onSend: (params: NotificationComposerPayload) => void;
+  onSendAndAnother?: (params: NotificationComposerPayload) => Promise<boolean> | boolean;
 }) {
+  const seed = initialNotification ?? prefillNotification;
   const isAdminOrCreator = ROLE_META[currentRole].canAccessAdminPanel;
   const availableTypes: NotificationType[] = isAdminOrCreator
     ? [NotificationType.ANNOUNCEMENT, NotificationType.TASK_UPDATE, NotificationType.DEADLINE_REMINDER]
@@ -533,30 +612,40 @@ function NotificationComposerDialogBody({
       ? [NotificationType.TASK_UPDATE, NotificationType.DEADLINE_REMINDER, NotificationType.ANNOUNCEMENT]
       : [NotificationType.ANNOUNCEMENT];
 
-  const initRole = initialNotification?.targetRole;
+  const initRole = seed?.targetRole;
   const initApproved =
-    initialNotification && parseApprovalStatus(initialNotification.approvalStatus) === ApprovalStatus.APPROVED;
+    seed && parseApprovalStatus(seed.approvalStatus) === ApprovalStatus.APPROVED;
 
-  const [title, setTitle] = useState(() => initialNotification?.title ?? '');
-  const [body, setBody] = useState(() => initialNotification?.body ?? '');
-  const [selectedType, setSelectedType] = useState<NotificationType>(() =>
-    initialNotification ? parseNotificationType(initialNotification.notificationType) : availableTypes[0]
+  const [title, setTitle] = useState(() =>
+    initialNotification
+      ? initialNotification.title
+      : prefillNotification
+        ? `${prefillNotification.title} (Copy)`.slice(0, 100)
+        : ''
   );
+  const [body, setBody] = useState(() => seed?.body ?? '');
+  const [selectedType, setSelectedType] = useState<NotificationType>(() => {
+    if (!seed) return availableTypes[0];
+    const parsed = parseNotificationType(seed.notificationType);
+    return availableTypes.includes(parsed) ? parsed : availableTypes[0];
+  });
   const [targetRole, setTargetRole] = useState<string>(() =>
     initRole && (initRole !== 'ADMIN' || initApproved) ? initRole : 'ALL'
   );
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
-    () => channels.find((c) => c.id === initialNotification?.targetChannelId)?.id ?? channels[0]?.id ?? null
+    () => channels.find((c) => c.id === seed?.targetChannelId)?.id ?? channels[0]?.id ?? null
   );
   const [selectedEventId, setSelectedEventId] = useState<string | null>(
-    () => events.find((e) => e.id === initialNotification?.targetEventId)?.id ?? events[0]?.id ?? null
+    () => events.find((e) => e.id === seed?.targetEventId)?.id ?? events[0]?.id ?? null
   );
   const [includeSchedule, setIncludeSchedule] = useState(
-    () => initialNotification?.scheduledForEpochMs != null
+    () => seed?.scheduledForEpochMs != null
   );
   const [scheduledEpochMs, setScheduledEpochMs] = useState<number>(
-    () => initialNotification?.scheduledForEpochMs ?? Date.now() + 3_600_000
+    () => seed?.scheduledForEpochMs ?? Date.now() + 3_600_000
   );
+  const [sentCount, setSentCount] = useState(0);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const willRequireApproval = selectedType === NotificationType.ANNOUNCEMENT && !isAdminOrCreator;
   const selectedChannel = channels.find((c) => c.id === selectedChannelId) ?? null;
@@ -568,10 +657,9 @@ function NotificationComposerDialogBody({
       ? 'Submit Announcement for Approval'
       : 'Targeted Alert Dispatcher';
 
-  const canSubmit = title.trim().length >= 2 && body.trim().length >= 2;
+  const canSubmit = !isBusy && title.trim().length >= 2 && body.trim().length >= 2;
 
-  const handleSubmit = () => {
-    if (!canSubmit) return;
+  const buildPayload = (): NotificationComposerPayload => {
     const scope = willRequireApproval
       ? 'ALL'
       : selectedType === NotificationType.TASK_UPDATE
@@ -596,7 +684,7 @@ function NotificationComposerDialogBody({
           ? targetRole
           : 'ALL';
 
-    onSend({
+    return {
       title,
       body,
       type: selectedType,
@@ -606,7 +694,23 @@ function NotificationComposerDialogBody({
       targetChannelName: selectedType === NotificationType.TASK_UPDATE ? (selectedChannel?.name ?? null) : null,
       targetEventId: selectedType === NotificationType.DEADLINE_REMINDER ? (selectedEvent?.id ?? null) : null,
       scheduledForEpochMs: includeSchedule ? scheduledEpochMs : null,
-    });
+    };
+  };
+
+  const handleSubmit = () => {
+    if (!canSubmit) return;
+    onSend(buildPayload());
+  };
+
+  const handleSubmitAndAnother = async () => {
+    if (!canSubmit || !onSendAndAnother) return;
+    const ok = await onSendAndAnother(buildPayload());
+    if (ok !== false) {
+      setTitle('');
+      setBody('');
+      setSentCount((c) => c + 1);
+      window.setTimeout(() => titleInputRef.current?.focus(), 20);
+    }
   };
 
   return (
@@ -615,14 +719,25 @@ function NotificationComposerDialogBody({
       onClose={onClose}
       title={dialogTitle}
       footer={
-        <>
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
             className="rounded-xl px-3.5 py-2 text-sm font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
           >
-            Cancel
+            {sentCount > 0 && !initialNotification ? 'Done' : 'Cancel'}
           </button>
+          {!initialNotification && onSendAndAnother && (
+            <button
+              type="button"
+              disabled={!canSubmit}
+              onClick={() => void handleSubmitAndAnother()}
+              data-testid="confirm_send_another_notif_button"
+              className="rounded-xl border border-[var(--rally-primary)] px-3.5 py-2 text-sm font-semibold text-[var(--rally-primary)] transition hover:bg-[var(--rally-primary-container)]/50 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              {willRequireApproval ? 'Submit & Add Another' : 'Send & Add Another'}
+            </button>
+          )}
           <button
             type="button"
             disabled={!canSubmit}
@@ -636,9 +751,14 @@ function NotificationComposerDialogBody({
                 ? 'Submit for Approval'
                 : 'Send Alert'}
           </button>
-        </>
+        </div>
       }
     >
+      {sentCount > 0 && !initialNotification && (
+        <div className="rounded-xl bg-[var(--rally-tertiary-container)] px-3.5 py-2 text-xs font-semibold text-[var(--rally-on-tertiary-container)]">
+          Dispatched {sentCount} alert{sentCount === 1 ? '' : 's'} — compose your next one below.
+        </div>
+      )}
       {availableTypes.length > 1 && !initialNotification && (
         <div className="space-y-1.5">
           <div className="text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
@@ -751,6 +871,7 @@ function NotificationComposerDialogBody({
           Alert Headline
         </label>
         <input
+          ref={titleInputRef}
           type="text"
           maxLength={100}
           value={title}
@@ -798,3 +919,118 @@ function NotificationComposerDialogBody({
     </ModalDialog>
   );
 }
+
+export function ConfirmDeleteDialog({
+  open,
+  title,
+  description,
+  confirmLabel = 'Delete',
+  isBusy = false,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel?: string;
+  isBusy?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <ModalDialog
+      open={open}
+      onClose={onCancel}
+      title={title}
+      maxWidthClass="max-w-md"
+      footer={
+        <>
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={onCancel}
+            data-testid="confirm_delete_cancel_button"
+            className="rounded-xl px-3.5 py-2 text-sm font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={onConfirm}
+            data-testid="confirm_delete_submit_button"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-error)] px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-45"
+          >
+            <Trash2 className="h-4 w-4" />
+            <span>{confirmLabel}</span>
+          </button>
+        </>
+      }
+    >
+      <p className="text-sm leading-relaxed text-[var(--rally-on-surface-variant)]">
+        {description}
+      </p>
+    </ModalDialog>
+  );
+}
+
+export function GroupAvatar({
+  groupName,
+  imageUrl,
+  size = 'md',
+  tone = 'surface',
+  testId,
+}: {
+  groupName: string;
+  imageUrl?: string | null;
+  size?: 'sm' | 'md' | 'lg' | 'xl';
+  tone?: 'surface' | 'on-dark' | 'on-light';
+  testId?: string;
+}) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const cleanUrl = imageUrl?.trim() || null;
+  const showImage = Boolean(cleanUrl && failedSrc !== cleanUrl);
+
+  const sizeClasses: Record<'sm' | 'md' | 'lg' | 'xl', string> = {
+    sm: 'h-8 w-8 rounded-xl text-xs',
+    md: 'h-12 w-12 rounded-2xl text-sm',
+    lg: 'h-14 w-14 rounded-2xl text-base',
+    xl: 'h-16 w-16 rounded-2xl text-lg',
+  };
+
+  const fallbackClasses =
+    tone === 'on-dark'
+      ? 'border-white/25 bg-white/15 text-white'
+      : tone === 'on-light'
+        ? 'border-slate-900/15 bg-slate-900/10 text-slate-900'
+        : 'border-[var(--rally-outline)]/65 bg-[var(--rally-primary-container)] text-[var(--rally-on-primary-container)]';
+
+  const frameBorderClass =
+    tone === 'on-dark'
+      ? 'border-white/30 bg-white/10'
+      : tone === 'on-light'
+        ? 'border-slate-900/15 bg-white/60'
+        : 'border-[var(--rally-outline)]/65 bg-[var(--rally-surface-variant)]';
+
+  return (
+    <div
+      data-testid={testId}
+      className={`relative flex shrink-0 items-center justify-center overflow-hidden border font-display font-bold shadow-xs ${sizeClasses[size]} ${
+        showImage ? frameBorderClass : fallbackClasses
+      }`}
+    >
+      {showImage ? (
+        <img
+          src={cleanUrl ?? undefined}
+          alt={`${groupName} profile`}
+          onError={() => setFailedSrc(cleanUrl)}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <span aria-hidden="true">{getGroupInitials(groupName)}</span>
+      )}
+    </div>
+  );
+}
+
+

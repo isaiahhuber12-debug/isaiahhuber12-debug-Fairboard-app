@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bell,
+  BellRing,
   Calendar,
   LayoutDashboard,
   Loader2,
@@ -13,18 +14,19 @@ import {
 } from 'lucide-react';
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
 import { auth, googleProvider } from './lib/firebase';
+import { getAppBackgroundPresentation } from './lib/backgrounds';
 import { getFriendlyErrorMessage } from './lib/firestoreError';
 import { useAiCoordinator } from './hooks/useAiCoordinator';
 import { useRallyWorkspace } from './hooks/useRallyWorkspace';
 import { type HubTab, ROLE_META } from './types/rally';
-import { RoleBadge } from './components/RallyComponents';
+import { GroupAvatar, OfflineStatusBadge, RoleBadge } from './components/RallyComponents';
 import { AuthAndJoinScreen } from './components/screens/AuthAndJoinScreen';
 import { CloudGroupHubScreen } from './components/screens/CloudGroupHubScreen';
 import { DashboardScreen } from './components/screens/DashboardScreen';
 import { CalendarScreen } from './components/screens/CalendarScreen';
 import { ChatsScreen } from './components/screens/ChatsScreen';
 import { NotificationsScreen } from './components/screens/NotificationsScreen';
-import { AdminPanelScreen } from './components/screens/AdminPanelScreen';
+import { AdminPanelScreen, type AdminPanelSubTab } from './components/screens/AdminPanelScreen';
 import { AiCoordinatorSheet } from './components/screens/AiCoordinatorSheet';
 
 interface NavTabItem {
@@ -50,15 +52,21 @@ export function App() {
     displayName: string | null;
   } | null>(null);
 
+  const [isDarkMode, setIsDarkMode] = useState(() =>
+    typeof window !== 'undefined' &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches
+  );
+
   // Sync Tailwind dark class with system preference
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const apply = () => {
-      document.documentElement.classList.toggle('dark', media.matches);
+    document.documentElement.classList.toggle('dark', media.matches);
+    const onChange = (e: MediaQueryListEvent) => {
+      document.documentElement.classList.toggle('dark', e.matches);
+      setIsDarkMode(e.matches);
     };
-    apply();
-    media.addEventListener('change', apply);
-    return () => media.removeEventListener('change', apply);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
   }, []);
 
   useEffect(() => {
@@ -133,6 +141,7 @@ export function App() {
     <CloudWorkspaceHost
       key={user.uid}
       user={user}
+      isDarkMode={isDarkMode}
       pendingJoin={pendingJoin}
       onPendingJoinConsumed={() => setPendingJoin(null)}
       onSignOut={() => void handleSignOut()}
@@ -142,11 +151,13 @@ export function App() {
 
 function CloudWorkspaceHost({
   user,
+  isDarkMode,
   pendingJoin,
   onPendingJoinConsumed,
   onSignOut,
 }: {
   user: User;
+  isDarkMode: boolean;
   pendingJoin: { code: string; displayName: string | null } | null;
   onPendingJoinConsumed: () => void;
   onSignOut: () => void;
@@ -155,6 +166,7 @@ function CloudWorkspaceHost({
   const ai = useAiCoordinator();
 
   const [selectedTab, setSelectedTab] = useState<HubTab>('dashboard');
+  const [adminSubTab, setAdminSubTab] = useState<AdminPanelSubTab>('controls');
   const [showAiSheet, setShowAiSheet] = useState(false);
 
   const visibleTabs = useMemo(() => {
@@ -176,8 +188,27 @@ function CloudWorkspaceHost({
     return () => window.clearTimeout(timer);
   }, [state.bannerMessage, actions]);
 
+  const appBg = useMemo(
+    () => getAppBackgroundPresentation(state.appBackground, isDarkMode),
+    [state.appBackground, isDarkMode]
+  );
+
+  const rootStyle = useMemo(
+    () =>
+      ({
+        ...appBg.style,
+        '--rally-canvas-text': appBg.isDarkCanvas ? '#F1F5F9' : '#111827',
+        '--rally-canvas-text-muted': appBg.isDarkCanvas ? '#CBD5E1' : '#4B5565',
+      }) as React.CSSProperties,
+    [appBg]
+  );
+
   return (
-    <div className="min-h-screen bg-[var(--rally-bg)] text-[var(--rally-on-surface)]">
+    <div
+      data-testid="app_workspace_canvas"
+      style={rootStyle}
+      className="min-h-screen bg-[var(--rally-bg)] text-[var(--rally-on-surface)] transition-[background] duration-300"
+    >
       {state.activeGroup === null ? (
         <div className="min-h-screen pb-10">
           <CloudGroupHubScreen state={state} actions={actions} onSignOut={onSignOut} />
@@ -188,6 +219,16 @@ function CloudWorkspaceHost({
           <header className="sticky top-0 z-30 border-b border-[var(--rally-outline)]/65 bg-[var(--rally-surface)]/95 backdrop-blur">
             <div className="flex h-14 items-center justify-between gap-3 px-4 sm:px-5">
               <div className="flex min-w-0 items-center gap-2.5">
+                <GroupAvatar
+                  groupName={state.activeGroup.name}
+                  imageUrl={
+                    state.activeGroup.groupImageUrl ??
+                    state.groupImagesById[state.activeGroup.id] ??
+                    null
+                  }
+                  size="sm"
+                  testId="topbar_group_avatar"
+                />
                 <span className="truncate font-display text-lg font-bold tracking-tight">
                   {state.activeGroup.name}
                 </span>
@@ -195,6 +236,7 @@ function CloudWorkspaceHost({
               </div>
 
               <div className="flex shrink-0 items-center gap-1.5">
+                <OfflineStatusBadge />
                 <button
                   type="button"
                   onClick={() => setShowAiSheet(true)}
@@ -264,6 +306,10 @@ function CloudWorkspaceHost({
                   }}
                   onOpenNotifications={() => setSelectedTab('alerts')}
                   onOpenAiCoordinator={() => setShowAiSheet(true)}
+                  onOpenAdminPanel={() => {
+                    setAdminSubTab('audit');
+                    setSelectedTab('admin');
+                  }}
                   onCopiedCode={() => actions.showBanner('Group invite code copied to clipboard')}
                 />
               )}
@@ -276,6 +322,8 @@ function CloudWorkspaceHost({
                 <AdminPanelScreen
                   state={state}
                   actions={actions}
+                  activeSubTab={adminSubTab}
+                  onSubTabChange={setAdminSubTab}
                   onCopiedCode={() => actions.showBanner('Group invite code copied to clipboard')}
                 />
               )}
@@ -314,6 +362,70 @@ function CloudWorkspaceHost({
             workspaceState={state}
             workspaceActions={actions}
           />
+        </div>
+      )}
+
+      {/* In-App Event Reminder Notifications */}
+      {state.inAppNotifications.length > 0 && (
+        <div
+          data-testid="in_app_notification_container"
+          aria-live="polite"
+          className="fixed right-4 top-16 z-50 flex w-[calc(100%-2rem)] max-w-sm flex-col gap-2.5"
+        >
+          {state.inAppNotifications.map((notif) => (
+            <div
+              key={notif.id}
+              role="alert"
+              data-testid={`in_app_reminder_toast_${notif.itemId}`}
+              className="rounded-2xl border border-[var(--rally-secondary)]/45 bg-[var(--rally-surface)] p-3.5 text-[var(--rally-on-surface)] shadow-xl ring-1 ring-black/5 backdrop-blur"
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--rally-secondary-container)] text-[var(--rally-secondary)]">
+                  <BellRing className="h-4.5 w-4.5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="font-display text-sm font-bold leading-snug">
+                    {notif.title}
+                  </div>
+                  <p className="mt-0.5 text-xs text-[var(--rally-on-surface-variant)]">
+                    {notif.body}
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                    {notif.eventId && state.activeGroup && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          actions.selectEvent(notif.eventId);
+                          setSelectedTab('calendar');
+                          actions.dismissInAppNotification(notif.id);
+                        }}
+                        data-testid={`open_event_from_notif_${notif.itemId}`}
+                        className="rounded-lg bg-[var(--rally-secondary)] px-2.5 py-1 text-xs font-semibold text-white hover:brightness-110"
+                      >
+                        Open Event
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => actions.dismissInAppNotification(notif.id)}
+                      data-testid={`dismiss_in_app_notif_${notif.itemId}`}
+                      className="rounded-lg border border-[var(--rally-outline)] px-2.5 py-1 text-xs font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => actions.dismissInAppNotification(notif.id)}
+                  aria-label="Dismiss reminder alert"
+                  className="rounded-lg p-1 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

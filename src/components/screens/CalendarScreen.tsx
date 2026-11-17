@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bell,
@@ -7,9 +7,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Copy,
   MapPin,
   Pencil,
   Plus,
+  Trash2,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
 import {
@@ -20,6 +22,7 @@ import {
   formatMonthYear,
   formatTime,
 } from '../../lib/dateFormat';
+import { isReminderAt30mSet } from '../../lib/notifications';
 import {
   type ChatChannel,
   type EventTask,
@@ -30,6 +33,7 @@ import {
   TaskStatus,
 } from '../../types/rally';
 import {
+  ConfirmDeleteDialog,
   DateTimePickerField,
   ModalDialog,
   ReminderEditorDialog,
@@ -54,12 +58,21 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
   const selectedEvent = events.find((e) => e.id === state.selectedEventId) ?? null;
 
   const [showCreateEventDialog, setShowCreateEventDialog] = useState(false);
+  const [duplicatingEvent, setDuplicatingEvent] = useState<RallyEvent | null>(null);
   const [editingEvent, setEditingEvent] = useState<RallyEvent | null>(null);
   const [showCreateTaskForEventId, setShowCreateTaskForEventId] = useState<string | null>(null);
+  const [duplicatingTask, setDuplicatingTask] = useState<EventTask | null>(null);
   const [editingTask, setEditingTask] = useState<EventTask | null>(null);
+  const [deletingEvent, setDeletingEvent] = useState<RallyEvent | null>(null);
+  const [deletingTask, setDeletingTask] = useState<EventTask | null>(null);
   const [reminderTarget, setReminderTarget] = useState<CalendarReminderTarget | null>(null);
 
   const canManage = ROLE_META[state.currentRole].canManageEventsAndTasks;
+  const isAdminOrCreator = ROLE_META[state.currentRole].canAccessAdminPanel;
+  const canDeleteEvent = (evt: RallyEvent) =>
+    isAdminOrCreator || evt.createdBy === state.currentUserId;
+  const canDeleteTask = (task: EventTask) =>
+    isAdminOrCreator || task.createdBy === state.currentUserId;
 
   return (
     <div className="mx-auto w-full max-w-[860px] px-4 py-5 sm:px-6">
@@ -74,10 +87,25 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
           state={state}
           actions={actions}
           canManage={canManage}
+          canDeleteEvent={canDeleteEvent(selectedEvent)}
+          canDeleteTask={canDeleteTask}
           onBack={() => actions.selectEvent(null)}
+          onDuplicateEvent={() => {
+            setDuplicatingEvent(selectedEvent);
+            setShowCreateEventDialog(true);
+          }}
           onEditEvent={() => setEditingEvent(selectedEvent)}
-          onAddTask={() => setShowCreateTaskForEventId(selectedEvent.id)}
+          onDeleteEvent={() => setDeletingEvent(selectedEvent)}
+          onAddTask={() => {
+            setDuplicatingTask(null);
+            setShowCreateTaskForEventId(selectedEvent.id);
+          }}
+          onDuplicateTask={(task) => {
+            setDuplicatingTask(task);
+            setShowCreateTaskForEventId(selectedEvent.id);
+          }}
           onEditTask={(task) => setEditingTask(task)}
+          onDeleteTask={(task) => setDeletingTask(task)}
           onOpenReminderEditor={setReminderTarget}
         />
       ) : (
@@ -85,8 +113,18 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
           events={events}
           state={state}
           canManage={canManage}
-          onOpenCreateEvent={() => setShowCreateEventDialog(true)}
+          canDeleteEvent={canDeleteEvent}
+          onOpenCreateEvent={() => {
+            setDuplicatingEvent(null);
+            setShowCreateEventDialog(true);
+          }}
+          onDuplicateEvent={(evt) => {
+            setDuplicatingEvent(evt);
+            setShowCreateEventDialog(true);
+          }}
           onEditEvent={(evt) => setEditingEvent(evt)}
+          onDeleteEvent={(evt) => setDeletingEvent(evt)}
+          onToggleRemind30m={(evt) => actions.toggleEventReminder30m(evt)}
           onOpenReminderEditor={setReminderTarget}
           onSelectEvent={(id) => actions.selectEvent(id)}
         />
@@ -96,17 +134,35 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
       <EventEditorDialog
         open={showCreateEventDialog}
         initialEvent={null}
-        onClose={() => setShowCreateEventDialog(false)}
+        prefillEvent={duplicatingEvent}
+        isBusy={state.isBusy}
+        onClose={() => {
+          setShowCreateEventDialog(false);
+          setDuplicatingEvent(null);
+        }}
         onSave={(title, desc, loc, cat, startMs, endMs) => {
           void actions.createEvent(title, desc, loc, cat, startMs, endMs);
           setShowCreateEventDialog(false);
+          setDuplicatingEvent(null);
         }}
+        onSaveAndAnother={(title, desc, loc, cat, startMs, endMs) =>
+          actions.createEvent(title, desc, loc, cat, startMs, endMs)
+        }
       />
 
       {/* Edit Event Modal */}
       <EventEditorDialog
         open={editingEvent !== null}
         initialEvent={editingEvent}
+        canDelete={editingEvent !== null && canDeleteEvent(editingEvent)}
+        isBusy={state.isBusy}
+        onDelete={() => {
+          if (editingEvent) {
+            const target = editingEvent;
+            setEditingEvent(null);
+            setDeletingEvent(target);
+          }
+        }}
         onClose={() => setEditingEvent(null)}
         onSave={(title, desc, loc, cat, startMs, endMs) => {
           if (editingEvent) {
@@ -120,8 +176,13 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
       <TaskEditorDialog
         open={showCreateTaskForEventId !== null}
         initialTask={null}
+        prefillTask={duplicatingTask}
         channels={channels}
-        onClose={() => setShowCreateTaskForEventId(null)}
+        isBusy={state.isBusy}
+        onClose={() => {
+          setShowCreateTaskForEventId(null);
+          setDuplicatingTask(null);
+        }}
         onSave={(title, desc, deadlineMs, capacity, _, channelId) => {
           if (showCreateTaskForEventId) {
             void actions.createTask(
@@ -134,7 +195,20 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
             );
           }
           setShowCreateTaskForEventId(null);
+          setDuplicatingTask(null);
         }}
+        onSaveAndAnother={(title, desc, deadlineMs, capacity, _, channelId) =>
+          showCreateTaskForEventId
+            ? actions.createTask(
+                showCreateTaskForEventId,
+                title,
+                desc,
+                deadlineMs,
+                capacity,
+                channelId
+              )
+            : Promise.resolve(false)
+        }
       />
 
       {/* Edit Task Modal */}
@@ -142,6 +216,14 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
         open={editingTask !== null}
         initialTask={editingTask}
         channels={channels}
+        canDelete={editingTask !== null && canDeleteTask(editingTask)}
+        onDelete={() => {
+          if (editingTask) {
+            const target = editingTask;
+            setEditingTask(null);
+            setDeletingTask(target);
+          }
+        }}
         onClose={() => setEditingTask(null)}
         onSave={(title, desc, deadlineMs, capacity, status, channelId) => {
           if (editingTask) {
@@ -160,13 +242,53 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
         }}
       />
 
+      {/* Delete Event Confirmation */}
+      <ConfirmDeleteDialog
+        open={deletingEvent !== null}
+        title="Delete Event?"
+        description={
+          deletingEvent
+            ? `Permanently delete "${deletingEvent.title}" and its volunteer tasks? This cannot be undone.`
+            : ''
+        }
+        confirmLabel="Delete Event"
+        isBusy={state.isBusy}
+        onCancel={() => setDeletingEvent(null)}
+        onConfirm={() => {
+          if (deletingEvent) {
+            void actions.deleteEvent(deletingEvent.id);
+          }
+          setDeletingEvent(null);
+        }}
+      />
+
+      {/* Delete Task Confirmation */}
+      <ConfirmDeleteDialog
+        open={deletingTask !== null}
+        title="Delete Task?"
+        description={
+          deletingTask
+            ? `Permanently delete "${deletingTask.title}" and clear its volunteer signups? This cannot be undone.`
+            : ''
+        }
+        confirmLabel="Delete Task"
+        isBusy={state.isBusy}
+        onCancel={() => setDeletingTask(null)}
+        onConfirm={() => {
+          if (deletingTask) {
+            void actions.deleteTask(deletingTask.eventId, deletingTask.id);
+          }
+          setDeletingTask(null);
+        }}
+      />
+
       {/* Reminder Editor Modal */}
       <ReminderEditorDialog
         open={reminderTarget !== null}
         itemTitle={reminderTarget?.title ?? ''}
         targetEpochMs={reminderTarget?.targetEpochMs ?? 0}
-        currentReminderEpochMs={
-          reminderTarget ? (state.remindedTimes[reminderTarget.itemId] ?? null) : null
+        currentReminderEpochMsList={
+          reminderTarget ? (state.remindedTimes[reminderTarget.itemId] ?? []) : []
         }
         onClose={() => setReminderTarget(null)}
         onSave={(triggerMs) => {
@@ -178,13 +300,14 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
               triggerMs
             );
           }
-          setReminderTarget(null);
         }}
-        onRemove={() => {
+        onRemove={(triggerAtMs) => {
           if (reminderTarget) {
-            actions.removeReminder(reminderTarget.itemId);
+            actions.removeReminder(reminderTarget.itemId, triggerAtMs);
           }
-          setReminderTarget(null);
+          if (triggerAtMs === undefined) {
+            setReminderTarget(null);
+          }
         }}
       />
     </div>
@@ -195,16 +318,24 @@ function CalendarOverviewView({
   events,
   state,
   canManage,
+  canDeleteEvent,
   onOpenCreateEvent,
+  onDuplicateEvent,
   onEditEvent,
+  onDeleteEvent,
+  onToggleRemind30m,
   onOpenReminderEditor,
   onSelectEvent,
 }: {
   events: RallyEvent[];
   state: RallyWorkspaceState;
   canManage: boolean;
+  canDeleteEvent: (evt: RallyEvent) => boolean;
   onOpenCreateEvent: () => void;
+  onDuplicateEvent: (evt: RallyEvent) => void;
   onEditEvent: (evt: RallyEvent) => void;
+  onDeleteEvent: (evt: RallyEvent) => void;
+  onToggleRemind30m: (evt: RallyEvent) => void;
   onOpenReminderEditor: (target: CalendarReminderTarget) => void;
   onSelectEvent: (eventId: string) => void;
 }) {
@@ -243,8 +374,10 @@ function CalendarOverviewView({
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="font-display text-2xl font-bold">Event Calendar</h1>
-          <p className="text-xs text-[var(--rally-on-surface-variant)]">
+          <h1 className="font-display text-2xl font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
+            Event Calendar
+          </h1>
+          <p className="text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
             Browse scheduled events, filter by day, or sign up for task shifts.
           </p>
         </div>
@@ -333,7 +466,7 @@ function CalendarOverviewView({
 
       {/* Filter Header */}
       <div className="flex items-center justify-between pt-1">
-        <h2 className="font-display text-lg font-bold">
+        <h2 className="font-display text-lg font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
           {selectedDayKey === null
             ? `All Scheduled Events (${filteredEvents.length})`
             : `Selected Day Events (${filteredEvents.length})`}
@@ -357,8 +490,9 @@ function CalendarOverviewView({
         <div className="space-y-3">
           {filteredEvents.map((evt) => {
             const evtTasks = state.allTasksByEvent[evt.id] ?? [];
-            const reminderMs = state.remindedTimes[evt.id] ?? null;
-            const isReminded = reminderMs !== null;
+            const evtReminders = state.remindedTimes[evt.id] ?? [];
+            const isReminded = evtReminders.length > 0;
+            const isRemind30m = isReminderAt30mSet(evtReminders, evt.startEpochMs);
 
             return (
               <div
@@ -378,19 +512,73 @@ function CalendarOverviewView({
                   </span>
                   <div className="flex items-center gap-1">
                     {canManage && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDuplicateEvent(evt);
+                          }}
+                          data-testid={`duplicate_event_${evt.id}`}
+                          title="Duplicate event"
+                          className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        >
+                          <Copy className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onEditEvent(evt);
+                          }}
+                          data-testid={`edit_event_${evt.id}`}
+                          title="Edit event"
+                          className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                      </>
+                    )}
+                    {canDeleteEvent(evt) && (
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          onEditEvent(evt);
+                          onDeleteEvent(evt);
                         }}
-                        data-testid={`edit_event_${evt.id}`}
-                        title="Edit event"
-                        className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        data-testid={`delete_event_${evt.id}`}
+                        title="Delete event"
+                        className="rounded-lg p-1.5 text-[var(--rally-error)] hover:bg-[var(--rally-error)]/10"
                       >
-                        <Pencil className="h-4 w-4" />
+                        <Trash2 className="h-4 w-4" />
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleRemind30m(evt);
+                      }}
+                      aria-pressed={isRemind30m}
+                      data-testid={`calendar_toggle_remind_event_${evt.id}`}
+                      title={
+                        isRemind30m
+                          ? 'Turn off 30-minute in-app reminder'
+                          : 'Remind me 30 minutes before start'
+                      }
+                      className={`inline-flex items-center gap-1 rounded-xl border px-2.5 py-1 text-xs font-semibold transition ${
+                        isRemind30m
+                          ? 'border-[var(--rally-secondary)]/50 bg-[var(--rally-secondary-container)] text-[var(--rally-on-secondary-container)] hover:brightness-95'
+                          : 'border-[var(--rally-outline)] bg-[var(--rally-surface)] text-[var(--rally-on-surface)] hover:bg-[var(--rally-surface-variant)]'
+                      }`}
+                    >
+                      {isRemind30m ? (
+                        <BellRing className="h-3.5 w-3.5 text-[var(--rally-secondary)]" />
+                      ) : (
+                        <Bell className="h-3.5 w-3.5 text-[var(--rally-on-surface-variant)]" />
+                      )}
+                      <span>{isRemind30m ? 'Reminded (30m)' : 'Remind Me'}</span>
+                    </button>
                     <button
                       type="button"
                       onClick={(e) => {
@@ -404,14 +592,10 @@ function CalendarOverviewView({
                         });
                       }}
                       data-testid={`calendar_remind_event_${evt.id}`}
-                      title="Configure event reminder"
-                      className="rounded-lg p-1.5 hover:bg-[var(--rally-surface-variant)]"
+                      title="Custom reminder times"
+                      className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
                     >
-                      {isReminded ? (
-                        <BellRing className="h-4 w-4 text-[var(--rally-secondary)]" />
-                      ) : (
-                        <Bell className="h-4 w-4 text-[var(--rally-on-surface-variant)]" />
-                      )}
+                      <Clock className="h-4 w-4" />
                     </button>
                   </div>
                 </div>
@@ -432,9 +616,13 @@ function CalendarOverviewView({
                   </span>
                 </div>
 
-                {reminderMs !== null && (
+                {isReminded && (
                   <div className="text-xs font-medium text-[var(--rally-secondary)]">
-                    Reminder: {formatDateTime(reminderMs)}
+                    {isRemind30m && evtReminders.length === 1
+                      ? `In-app reminder 30m before (${formatDateTime(evtReminders[0])})`
+                      : evtReminders.length === 1
+                        ? `Reminder: ${formatDateTime(evtReminders[0])}`
+                        : `${evtReminders.length} reminders set (next: ${formatDateTime(evtReminders[0])})`}
                   </div>
                 )}
 
@@ -458,10 +646,16 @@ function EventDetailView({
   state,
   actions,
   canManage,
+  canDeleteEvent,
+  canDeleteTask,
   onBack,
+  onDuplicateEvent,
   onEditEvent,
+  onDeleteEvent,
   onAddTask,
+  onDuplicateTask,
   onEditTask,
+  onDeleteTask,
   onOpenReminderEditor,
 }: {
   event: RallyEvent;
@@ -469,14 +663,22 @@ function EventDetailView({
   state: RallyWorkspaceState;
   actions: RallyWorkspaceActions;
   canManage: boolean;
+  canDeleteEvent: boolean;
+  canDeleteTask: (task: EventTask) => boolean;
   onBack: () => void;
+  onDuplicateEvent: () => void;
   onEditEvent: () => void;
+  onDeleteEvent: () => void;
   onAddTask: () => void;
+  onDuplicateTask: (task: EventTask) => void;
   onEditTask: (task: EventTask) => void;
+  onDeleteTask: (task: EventTask) => void;
   onOpenReminderEditor: (target: CalendarReminderTarget) => void;
 }) {
-  const eventReminderMs = state.remindedTimes[event.id] ?? null;
-  const isEventReminded = eventReminderMs !== null;
+  const [expandedVolunteersTaskIds, setExpandedVolunteersTaskIds] = useState<Record<string, boolean>>({});
+  const eventReminders = state.remindedTimes[event.id] ?? [];
+  const isEventReminded = eventReminders.length > 0;
+  const isRemind30m = isReminderAt30mSet(eventReminders, event.startEpochMs);
 
   return (
     <div className="space-y-4">
@@ -496,16 +698,56 @@ function EventDetailView({
 
         <div className="flex items-center gap-2">
           {canManage && (
+            <>
+              <button
+                type="button"
+                onClick={onDuplicateEvent}
+                data-testid="detail_duplicate_event_button"
+                title="Duplicate event"
+                className="rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] p-2 text-[var(--rally-on-surface)] hover:bg-[var(--rally-surface-variant)]"
+              >
+                <Copy className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onEditEvent}
+                data-testid="detail_edit_event_button"
+                title="Edit event details"
+                className="rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] p-2 text-[var(--rally-on-surface)] hover:bg-[var(--rally-surface-variant)]"
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+            </>
+          )}
+          {canDeleteEvent && (
             <button
               type="button"
-              onClick={onEditEvent}
-              data-testid="detail_edit_event_button"
-              title="Edit event details"
-              className="rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] p-2 text-[var(--rally-on-surface)] hover:bg-[var(--rally-surface-variant)]"
+              onClick={onDeleteEvent}
+              data-testid="detail_delete_event_button"
+              title="Delete event"
+              className="rounded-xl border border-[var(--rally-error)]/40 bg-[var(--rally-surface)] p-2 text-[var(--rally-error)] hover:bg-[var(--rally-error)]/10"
             >
-              <Pencil className="h-4 w-4" />
+              <Trash2 className="h-4 w-4" />
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => actions.toggleEventReminder30m(event)}
+            aria-pressed={isRemind30m}
+            data-testid="detail_toggle_remind_event_button"
+            className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+              isRemind30m
+                ? 'border-[var(--rally-secondary)]/50 bg-[var(--rally-secondary-container)] text-[var(--rally-on-secondary-container)] hover:brightness-95'
+                : 'border-[var(--rally-outline)] bg-[var(--rally-surface)] text-[var(--rally-on-surface)] hover:bg-[var(--rally-surface-variant)]'
+            }`}
+          >
+            {isRemind30m ? (
+              <BellRing className="h-4 w-4 text-[var(--rally-secondary)]" />
+            ) : (
+              <Bell className="h-4 w-4" />
+            )}
+            <span>{isRemind30m ? 'Reminded (30m before)' : 'Remind Me (30m)'}</span>
+          </button>
           <button
             type="button"
             onClick={() =>
@@ -518,14 +760,13 @@ function EventDetailView({
               })
             }
             data-testid="detail_remind_event_button"
+            title="Configure custom event reminder times"
             className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-2 text-xs font-semibold hover:bg-[var(--rally-surface-variant)]"
           >
-            {isEventReminded ? (
-              <BellRing className="h-4 w-4 text-[var(--rally-secondary)]" />
-            ) : (
-              <Bell className="h-4 w-4" />
-            )}
-            <span>{isEventReminded ? 'Edit Reminder' : 'Remind Me'}</span>
+            <Clock className="h-4 w-4" />
+            <span>
+              {isEventReminded ? `Custom (${eventReminders.length})` : 'Custom'}
+            </span>
           </button>
         </div>
       </div>
@@ -539,9 +780,13 @@ function EventDetailView({
         <div className="text-xs text-[var(--rally-on-surface-variant)]">
           Location: {event.location} • Lead: {event.organizerName}
         </div>
-        {eventReminderMs !== null && (
+        {isEventReminded && (
           <div className="text-xs font-semibold text-[var(--rally-secondary)]">
-            Reminder set for {formatDateTime(eventReminderMs)}
+            {isRemind30m && eventReminders.length === 1
+              ? `In-app reminder active for 30 min before (${formatDateTime(eventReminders[0])})`
+              : eventReminders.length === 1
+                ? `Reminder set for ${formatDateTime(eventReminders[0])}`
+                : `${eventReminders.length} reminders set (next: ${formatDateTime(eventReminders[0])})`}
           </div>
         )}
         {event.description && <p className="pt-1 text-sm">{event.description}</p>}
@@ -572,8 +817,8 @@ function EventDetailView({
           {tasks.map((task) => {
             const claimed = task.assignedUids.includes(state.currentUserId);
             const isFull = task.assignedCount >= task.capacity;
-            const taskReminderMs = state.remindedTimes[task.id] ?? null;
-            const taskReminded = taskReminderMs !== null;
+            const taskReminders = state.remindedTimes[task.id] ?? [];
+            const taskReminded = taskReminders.length > 0;
             const pct =
               task.capacity <= 0
                 ? 0
@@ -593,22 +838,68 @@ function EventDetailView({
                       Deadline: {formatDateTime(task.deadlineEpochMs)} (
                       {countdownLabel(task.deadlineEpochMs)})
                     </div>
-                    {taskReminderMs !== null && (
+                    {taskReminded && (
                       <div className="text-xs font-medium text-[var(--rally-primary)]">
-                        Reminder: {formatDateTime(taskReminderMs)}
+                        {taskReminders.length === 1
+                          ? `Reminder: ${formatDateTime(taskReminders[0])}`
+                          : `${taskReminders.length} reminders set (next: ${formatDateTime(taskReminders[0])})`}
                       </div>
                     )}
                   </div>
                   <div className="flex items-center gap-1">
                     {canManage && (
+                      <>
+                        {parseTaskStatus(task.status) !== TaskStatus.COMPLETED && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void actions.updateTask(
+                                event.id,
+                                task.id,
+                                task.title,
+                                task.description,
+                                task.deadlineEpochMs,
+                                task.capacity,
+                                TaskStatus.COMPLETED,
+                                task.chatChannelId
+                              )
+                            }
+                            data-testid={`complete_task_${task.id}`}
+                            title="Mark task completed"
+                            className="rounded-lg p-1.5 text-[var(--rally-tertiary)] hover:bg-[var(--rally-tertiary-container)]/50"
+                          >
+                            <CheckCircle2 className="h-4 w-4" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onDuplicateTask(task)}
+                          data-testid={`duplicate_task_${task.id}`}
+                          title="Duplicate task"
+                          className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        >
+                          <Copy className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onEditTask(task)}
+                          data-testid={`edit_task_${task.id}`}
+                          title="Edit task"
+                          className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                      </>
+                    )}
+                    {canDeleteTask(task) && (
                       <button
                         type="button"
-                        onClick={() => onEditTask(task)}
-                        data-testid={`edit_task_${task.id}`}
-                        title="Edit task"
-                        className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        onClick={() => onDeleteTask(task)}
+                        data-testid={`delete_task_${task.id}`}
+                        title="Delete task"
+                        className="rounded-lg p-1.5 text-[var(--rally-error)] hover:bg-[var(--rally-error)]/10"
                       >
-                        <Pencil className="h-4 w-4" />
+                        <Trash2 className="h-4 w-4" />
                       </button>
                     )}
                     <button
@@ -623,7 +914,7 @@ function EventDetailView({
                         })
                       }
                       data-testid={`remind_task_${task.id}`}
-                      title="Configure task deadline reminder"
+                      title="Configure task deadline reminders"
                       className="rounded-lg p-1.5 hover:bg-[var(--rally-surface-variant)]"
                     >
                       {taskReminded ? (
@@ -678,15 +969,36 @@ function EventDetailView({
                 </div>
 
                 {task.assignedNames.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {task.assignedNames.map((volunteer, idx) => (
-                      <span
-                        key={`${volunteer}_${idx}`}
-                        className="rounded-full bg-[var(--rally-surface-variant)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--rally-on-surface-variant)]"
+                  <div className="space-y-1.5 pt-1">
+                    <div className="flex flex-wrap gap-1.5">
+                      {(expandedVolunteersTaskIds[task.id]
+                        ? task.assignedNames
+                        : task.assignedNames.slice(0, 20)
+                      ).map((volunteer, idx) => (
+                        <span
+                          key={`${volunteer}_${idx}`}
+                          className="rounded-full bg-[var(--rally-surface-variant)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--rally-on-surface-variant)]"
+                        >
+                          {volunteer}
+                        </span>
+                      ))}
+                    </div>
+                    {task.assignedNames.length > 20 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedVolunteersTaskIds((prev) => ({
+                            ...prev,
+                            [task.id]: !prev[task.id],
+                          }))
+                        }
+                        className="text-xs font-semibold text-[var(--rally-primary)] hover:underline"
                       >
-                        {volunteer}
-                      </span>
-                    ))}
+                        {expandedVolunteersTaskIds[task.id]
+                          ? 'Show fewer volunteers'
+                          : `Show all ${task.assignedNames.length} volunteers`}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -701,11 +1013,20 @@ function EventDetailView({
 function EventEditorDialog({
   open,
   initialEvent,
+  prefillEvent = null,
+  canDelete = false,
+  isBusy = false,
+  onDelete,
   onClose,
   onSave,
+  onSaveAndAnother,
 }: {
   open: boolean;
   initialEvent: RallyEvent | null;
+  prefillEvent?: RallyEvent | null;
+  canDelete?: boolean;
+  isBusy?: boolean;
+  onDelete?: () => void;
   onClose: () => void;
   onSave: (
     title: string,
@@ -715,24 +1036,46 @@ function EventEditorDialog({
     startEpochMs: number,
     endEpochMs: number
   ) => void;
+  onSaveAndAnother?: (
+    title: string,
+    description: string,
+    location: string,
+    category: string,
+    startEpochMs: number,
+    endEpochMs: number
+  ) => Promise<boolean>;
 }) {
   if (!open) return null;
   return (
     <EventEditorDialogBody
-      key={initialEvent?.id ?? 'new_event'}
+      key={initialEvent?.id ?? (prefillEvent ? `dup_${prefillEvent.id}` : 'new_event')}
       initialEvent={initialEvent}
+      prefillEvent={prefillEvent}
+      canDelete={canDelete}
+      isBusy={isBusy}
+      onDelete={onDelete}
       onClose={onClose}
       onSave={onSave}
+      onSaveAndAnother={onSaveAndAnother}
     />
   );
 }
 
 function EventEditorDialogBody({
   initialEvent,
+  prefillEvent = null,
+  canDelete = false,
+  isBusy = false,
+  onDelete,
   onClose,
   onSave,
+  onSaveAndAnother,
 }: {
   initialEvent: RallyEvent | null;
+  prefillEvent?: RallyEvent | null;
+  canDelete?: boolean;
+  isBusy?: boolean;
+  onDelete?: () => void;
   onClose: () => void;
   onSave: (
     title: string,
@@ -742,23 +1085,58 @@ function EventEditorDialogBody({
     startEpochMs: number,
     endEpochMs: number
   ) => void;
+  onSaveAndAnother?: (
+    title: string,
+    description: string,
+    location: string,
+    category: string,
+    startEpochMs: number,
+    endEpochMs: number
+  ) => Promise<boolean>;
 }) {
+  const seed = initialEvent ?? prefillEvent;
   const [mountNow] = useState(() => Date.now());
-  const [title, setTitle] = useState(() => initialEvent?.title ?? '');
-  const [description, setDescription] = useState(() => initialEvent?.description ?? '');
-  const [location, setLocation] = useState(() => initialEvent?.location ?? '');
-  const [category, setCategory] = useState(() => initialEvent?.category ?? 'Main Event');
+  const [title, setTitle] = useState(() =>
+    initialEvent
+      ? initialEvent.title
+      : prefillEvent
+        ? `${prefillEvent.title} (Copy)`.slice(0, 100)
+        : ''
+  );
+  const [description, setDescription] = useState(() => seed?.description ?? '');
+  const [location, setLocation] = useState(() => seed?.location ?? '');
+  const [category, setCategory] = useState(() => seed?.category ?? 'Main Event');
   const [startEpochMs, setStartEpochMs] = useState(
-    () => initialEvent?.startEpochMs ?? mountNow + 26 * 3_600_000
+    () => seed?.startEpochMs ?? mountNow + 26 * 3_600_000
   );
   const [endEpochMs, setEndEpochMs] = useState(
     () =>
-      initialEvent?.endEpochMs ??
-      (initialEvent?.startEpochMs ?? mountNow + 26 * 3_600_000) + 2 * 3_600_000
+      seed?.endEpochMs ??
+      (seed?.startEpochMs ?? mountNow + 26 * 3_600_000) + 2 * 3_600_000
   );
+  const [addedCount, setAddedCount] = useState(0);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const canSave =
-    title.trim().length >= 2 && location.trim().length >= 1 && endEpochMs > startEpochMs;
+    !isBusy && title.trim().length >= 2 && location.trim().length >= 1 && endEpochMs > startEpochMs;
+
+  const handlePublishAndAnother = async () => {
+    if (!canSave || !onSaveAndAnother) return;
+    const ok = await onSaveAndAnother(
+      title,
+      description,
+      location,
+      category,
+      startEpochMs,
+      endEpochMs
+    );
+    if (ok) {
+      setTitle('');
+      setDescription('');
+      setAddedCount((c) => c + 1);
+      window.setTimeout(() => titleInputRef.current?.focus(), 20);
+    }
+  };
 
   return (
     <ModalDialog
@@ -766,14 +1144,36 @@ function EventEditorDialogBody({
       onClose={onClose}
       title={initialEvent ? 'Edit Event & Schedule' : 'Create Calendar Event'}
       footer={
-        <>
+        <div className="flex w-full flex-wrap items-center justify-end gap-2">
+          {initialEvent && canDelete && onDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              data-testid="modal_delete_event_button"
+              className="mr-auto inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold text-[var(--rally-error)] hover:bg-[var(--rally-error)]/10"
+            >
+              <Trash2 className="h-4 w-4" />
+              <span>Delete</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
             className="rounded-xl px-3.5 py-2 text-sm font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
           >
-            Cancel
+            {addedCount > 0 && !initialEvent ? 'Done' : 'Cancel'}
           </button>
+          {!initialEvent && onSaveAndAnother && (
+            <button
+              type="button"
+              disabled={!canSave}
+              onClick={() => void handlePublishAndAnother()}
+              data-testid="confirm_create_another_event_button"
+              className="rounded-xl border border-[var(--rally-primary)] px-3.5 py-2 text-sm font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50 disabled:opacity-45"
+            >
+              Publish &amp; Add Another
+            </button>
+          )}
           <button
             type="button"
             disabled={!canSave}
@@ -785,14 +1185,21 @@ function EventEditorDialogBody({
           >
             {initialEvent ? 'Save Changes' : 'Publish Event'}
           </button>
-        </>
+        </div>
       }
     >
+      {addedCount > 0 && !initialEvent && (
+        <div className="rounded-xl bg-[var(--rally-tertiary-container)] px-3.5 py-2 text-xs font-semibold text-[var(--rally-on-tertiary-container)]">
+          Published {addedCount} event{addedCount === 1 ? '' : 's'} — add another event below.
+        </div>
+      )}
+
       <div className="space-y-1">
         <label className="block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
           Event Title
         </label>
         <input
+          ref={titleInputRef}
           type="text"
           value={title}
           onChange={(e) => setTitle(e.target.value.slice(0, 100))}
@@ -865,13 +1272,22 @@ function EventEditorDialogBody({
 function TaskEditorDialog({
   open,
   initialTask,
+  prefillTask = null,
   channels,
+  canDelete = false,
+  isBusy = false,
+  onDelete,
   onClose,
   onSave,
+  onSaveAndAnother,
 }: {
   open: boolean;
   initialTask: EventTask | null;
+  prefillTask?: EventTask | null;
   channels: ChatChannel[];
+  canDelete?: boolean;
+  isBusy?: boolean;
+  onDelete?: () => void;
   onClose: () => void;
   onSave: (
     title: string,
@@ -881,27 +1297,49 @@ function TaskEditorDialog({
     status: TaskStatus,
     chatChannelId: string | null
   ) => void;
+  onSaveAndAnother?: (
+    title: string,
+    description: string,
+    deadlineEpochMs: number,
+    capacity: number,
+    status: TaskStatus,
+    chatChannelId: string | null
+  ) => Promise<boolean>;
 }) {
   if (!open) return null;
   return (
     <TaskEditorDialogBody
-      key={initialTask?.id ?? 'new_task'}
+      key={initialTask?.id ?? (prefillTask ? `dup_${prefillTask.id}` : 'new_task')}
       initialTask={initialTask}
+      prefillTask={prefillTask}
       channels={channels}
+      canDelete={canDelete}
+      isBusy={isBusy}
+      onDelete={onDelete}
       onClose={onClose}
       onSave={onSave}
+      onSaveAndAnother={onSaveAndAnother}
     />
   );
 }
 
 function TaskEditorDialogBody({
   initialTask,
+  prefillTask = null,
   channels,
+  canDelete = false,
+  isBusy = false,
+  onDelete,
   onClose,
   onSave,
+  onSaveAndAnother,
 }: {
   initialTask: EventTask | null;
+  prefillTask?: EventTask | null;
   channels: ChatChannel[];
+  canDelete?: boolean;
+  isBusy?: boolean;
+  onDelete?: () => void;
   onClose: () => void;
   onSave: (
     title: string,
@@ -911,22 +1349,58 @@ function TaskEditorDialogBody({
     status: TaskStatus,
     chatChannelId: string | null
   ) => void;
+  onSaveAndAnother?: (
+    title: string,
+    description: string,
+    deadlineEpochMs: number,
+    capacity: number,
+    status: TaskStatus,
+    chatChannelId: string | null
+  ) => Promise<boolean>;
 }) {
+  const seed = initialTask ?? prefillTask;
   const minCap = Math.max(1, initialTask?.assignedCount ?? 1);
-  const [title, setTitle] = useState(() => initialTask?.title ?? '');
-  const [description, setDescription] = useState(() => initialTask?.description ?? '');
-  const [capacityText, setCapacityText] = useState(() => String(initialTask?.capacity ?? 5));
+  const [title, setTitle] = useState(() =>
+    initialTask
+      ? initialTask.title
+      : prefillTask
+        ? `${prefillTask.title} (Copy)`.slice(0, 100)
+        : ''
+  );
+  const [description, setDescription] = useState(() => seed?.description ?? '');
+  const [capacityText, setCapacityText] = useState(() => String(seed?.capacity ?? 5));
   const [deadlineEpochMs, setDeadlineEpochMs] = useState(
-    () => initialTask?.deadlineEpochMs ?? Date.now() + 12 * 3_600_000
+    () => seed?.deadlineEpochMs ?? Date.now() + 12 * 3_600_000
   );
   const [selectedStatus, setSelectedStatus] = useState<TaskStatus>(() =>
     initialTask ? parseTaskStatus(initialTask.status) : TaskStatus.OPEN
   );
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
-    () => initialTask?.chatChannelId ?? channels[0]?.id ?? null
+    () => seed?.chatChannelId ?? channels[0]?.id ?? null
   );
+  const [addedCount, setAddedCount] = useState(0);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
-  const parsedCap = Math.min(50, Math.max(minCap, Number.parseInt(capacityText, 10) || minCap));
+  const parsedCap = Math.min(500, Math.max(minCap, Number.parseInt(capacityText, 10) || minCap));
+  const canSubmit = !isBusy && title.trim().length >= 2;
+
+  const handleCreateAnother = async () => {
+    if (!canSubmit || !onSaveAndAnother) return;
+    const ok = await onSaveAndAnother(
+      title,
+      description,
+      deadlineEpochMs,
+      parsedCap,
+      selectedStatus,
+      selectedChannelId
+    );
+    if (ok) {
+      setTitle('');
+      setDescription('');
+      setAddedCount((c) => c + 1);
+      window.setTimeout(() => titleInputRef.current?.focus(), 20);
+    }
+  };
 
   return (
     <ModalDialog
@@ -934,17 +1408,39 @@ function TaskEditorDialogBody({
       onClose={onClose}
       title={initialTask ? 'Edit Task & Deadline' : 'Add Event Task'}
       footer={
-        <>
+        <div className="flex w-full flex-wrap items-center justify-end gap-2">
+          {initialTask && canDelete && onDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              data-testid="modal_delete_task_button"
+              className="mr-auto inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold text-[var(--rally-error)] hover:bg-[var(--rally-error)]/10"
+            >
+              <Trash2 className="h-4 w-4" />
+              <span>Delete</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
             className="rounded-xl px-3.5 py-2 text-sm font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
           >
-            Cancel
+            {addedCount > 0 && !initialTask ? 'Done' : 'Cancel'}
           </button>
+          {!initialTask && onSaveAndAnother && (
+            <button
+              type="button"
+              disabled={!canSubmit}
+              onClick={() => void handleCreateAnother()}
+              data-testid="confirm_create_another_task_button"
+              className="rounded-xl border border-[var(--rally-primary)] px-3.5 py-2 text-sm font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50 disabled:opacity-45"
+            >
+              Add &amp; Create Another
+            </button>
+          )}
           <button
             type="button"
-            disabled={title.trim().length < 2}
+            disabled={!canSubmit}
             onClick={() =>
               onSave(
                 title,
@@ -960,14 +1456,21 @@ function TaskEditorDialogBody({
           >
             {initialTask ? 'Save Changes' : 'Add Task'}
           </button>
-        </>
+        </div>
       }
     >
+      {addedCount > 0 && !initialTask && (
+        <div className="rounded-xl bg-[var(--rally-tertiary-container)] px-3.5 py-2 text-xs font-semibold text-[var(--rally-on-tertiary-container)]">
+          Added {addedCount} task{addedCount === 1 ? '' : 's'} — create another shift below.
+        </div>
+      )}
+
       <div className="space-y-1">
         <label className="block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
           Task Title
         </label>
         <input
+          ref={titleInputRef}
           type="text"
           value={title}
           onChange={(e) => setTitle(e.target.value.slice(0, 100))}
@@ -990,13 +1493,13 @@ function TaskEditorDialogBody({
 
       <div className="space-y-1">
         <label className="block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
-          Volunteer Capacity ({minCap}–50)
+          Volunteer Capacity ({minCap}–500)
         </label>
         <input
           type="text"
           inputMode="numeric"
           value={capacityText}
-          onChange={(e) => setCapacityText(e.target.value.replace(/\D/g, '').slice(0, 2))}
+          onChange={(e) => setCapacityText(e.target.value.replace(/\D/g, '').slice(0, 3))}
           data-testid="task_capacity_input"
           className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2 font-mono-code text-sm focus:border-[var(--rally-primary)] focus:outline-none"
         />

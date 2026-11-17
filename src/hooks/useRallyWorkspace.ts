@@ -1,20 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 import * as repo from '../services/rallyRepository';
+import { describeBackgroundSpec } from '../lib/backgrounds';
+import {
+  type AuditLogScope,
+  buildAuditLogCsv,
+  buildCombinedRecordKeepingCsv,
+  buildGroupMembersCsv,
+  combineAuditLogsWithOrigin,
+  downloadCsvFile,
+  filterAndSortAuditLogs,
+  makeDatedCsvFilename,
+} from '../lib/csvExport';
+import { formatDateTime } from '../lib/dateFormat';
 import { getFriendlyErrorMessage } from '../lib/firestoreError';
 import {
   cancelBrowserReminder,
+  cancelBrowserReminderAt,
+  getEvent30mReminderEpochMs,
+  isReminderAt30mSet,
   postBrowserNotification,
+  reminderTimerKey,
   scheduleBrowserReminder,
 } from '../lib/notifications';
+import * as smsService from '../services/smsService';
 import {
+  ActivityAction,
+  ActivityCategory,
   ApprovalStatus,
   type AsyncDataState,
   type ChannelAccessLevel,
   type ChatChannel,
   type ChatMessage,
+  DEFAULT_SMS_PREFERENCES,
   type EngagementAnalytics,
   type EventTask,
+  type GroupActivityLog,
   type GroupMember,
   type HubNotification,
   type JoinedGroupRef,
@@ -26,8 +47,20 @@ import {
   type RallyEvent,
   type RallyGroup,
   ROLE_META,
+  type SmsPreferences,
   TaskStatus,
 } from '../types/rally';
+
+export interface InAppReminderNotification {
+  id: string;
+  itemId: string;
+  eventId: string | null;
+  title: string;
+  body: string;
+  eventStartEpochMs: number | null;
+  triggerAtEpochMs: number;
+  triggeredAtMs: number;
+}
 
 export interface RallyWorkspaceState {
   isCloudMode: boolean;
@@ -45,9 +78,16 @@ export interface RallyWorkspaceState {
   selectedChannelId: string | null;
   messagesState: AsyncDataState<ChatMessage[]>;
   notificationsState: AsyncDataState<HubNotification[]>;
+  activityLogsState: AsyncDataState<GroupActivityLog[]>;
   membersState: AsyncDataState<GroupMember[]>;
   analytics: EngagementAnalytics;
-  remindedTimes: Record<string, number>;
+  remindedTimes: Record<string, number[]>;
+  inAppNotifications: InAppReminderNotification[];
+  appBackground: string;
+  groupBackgroundsById: Record<string, string>;
+  groupImagesById: Record<string, string | null>;
+  smsPreferences: SmsPreferences;
+  smsServerConfigured: boolean;
   bannerMessage: string | null;
   isBusy: boolean;
 }
@@ -57,9 +97,19 @@ export interface RallyWorkspaceActions {
   selectChannel: (channelId: string | null) => void;
   switchGroup: (groupId: string) => void;
   joinGroupByCode: (code: string, displayName?: string | null) => Promise<void>;
-  createGroupWithCode: (name: string, description: string, groupCode: string) => Promise<void>;
+  createGroupWithCode: (
+    name: string,
+    description: string,
+    groupCode: string,
+    switchAfterCreate?: boolean,
+    groupImageUrl?: string | null
+  ) => Promise<boolean>;
   updateGroupCode: (newCode: string) => Promise<void>;
   updateGroupDetails: (name: string, description: string) => Promise<void>;
+  updateAppBackground: (backgroundSpec: string) => Promise<void>;
+  updateGroupBackground: (groupId: string, backgroundSpec: string) => Promise<void>;
+  updateGroupImage: (groupId: string, groupImageUrl: string | null) => Promise<boolean>;
+  deleteGroup: (groupId: string, groupCode?: string | null) => Promise<void>;
   updateDisplayName: (newDisplayName: string) => Promise<void>;
   createEvent: (
     title: string,
@@ -68,7 +118,7 @@ export interface RallyWorkspaceActions {
     category: string,
     startEpochMs: number,
     endEpochMs: number
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   updateEvent: (
     eventId: string,
     title: string,
@@ -78,6 +128,7 @@ export interface RallyWorkspaceActions {
     startEpochMs: number,
     endEpochMs: number
   ) => Promise<void>;
+  deleteEvent: (eventId: string) => Promise<void>;
   createTask: (
     eventId: string,
     title: string,
@@ -85,7 +136,7 @@ export interface RallyWorkspaceActions {
     deadlineEpochMs: number,
     capacity: number,
     chatChannelId?: string | null
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   updateTask: (
     eventId: string,
     taskId: string,
@@ -96,18 +147,20 @@ export interface RallyWorkspaceActions {
     status: TaskStatus,
     chatChannelId?: string | null
   ) => Promise<void>;
+  deleteTask: (eventId: string, taskId: string) => Promise<void>;
   toggleTaskSignup: (eventId: string, taskId: string) => Promise<void>;
   createChannel: (
     name: string,
     description: string,
     accessLevel: ChannelAccessLevel
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   updateChannel: (
     channelId: string,
     name: string,
     description: string,
     accessLevel: ChannelAccessLevel
   ) => Promise<void>;
+  deleteChannel: (channelId: string) => Promise<void>;
   sendMessage: (channelId: string, text: string) => Promise<void>;
   editMessage: (channelId: string, messageId: string, newText: string) => Promise<void>;
   deleteMessage: (channelId: string, messageId: string) => Promise<void>;
@@ -121,7 +174,7 @@ export interface RallyWorkspaceActions {
     targetChannelName: string | null;
     targetEventId: string | null;
     scheduledForEpochMs?: number | null;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
   updateNotification: (params: {
     notificationId: string;
     title: string;
@@ -137,13 +190,26 @@ export interface RallyWorkspaceActions {
   approveNotification: (notificationId: string) => Promise<void>;
   deleteNotification: (notificationId: string) => Promise<void>;
   updateMemberRole: (memberUid: string, newRole: MemberRole) => Promise<void>;
+  removeMember: (memberUid: string) => Promise<void>;
   scheduleOrUpdateReminder: (
     itemId: string,
     title: string,
     body: string,
     triggerAtEpochMs: number
   ) => void;
-  removeReminder: (itemId: string) => void;
+  removeReminder: (itemId: string, triggerAtEpochMs?: number) => void;
+  toggleEventReminder30m: (event: RallyEvent) => void;
+  dismissInAppNotification: (notificationId: string) => void;
+  dismissAllInAppNotifications: () => void;
+  saveSmsPreferences: (prefs: SmsPreferences) => Promise<boolean>;
+  sendTestSms: (phone: string) => Promise<void>;
+  exportAuditLogCsv: (options?: {
+    scope?: AuditLogScope;
+    searchQuery?: string;
+    sortOrder?: 'asc' | 'desc';
+  }) => Promise<number>;
+  exportMembersCsv: (membersOverride?: GroupMember[]) => number;
+  exportCombinedRecordsCsv: () => Promise<boolean>;
   showBanner: (message: string) => void;
   clearBanner: () => void;
   leaveSession: () => void;
@@ -192,20 +258,148 @@ export function useRallyWorkspace(
     key: string;
     state: AsyncDataState<HubNotification[]>;
   } | null>(null);
-  const [remindedTimes, setRemindedTimes] = useState<Record<string, number>>(() => {
+  const [activityLogsEntry, setActivityLogsEntry] = useState<{
+    key: string;
+    state: AsyncDataState<GroupActivityLog[]>;
+  } | null>(null);
+  const [remindedTimes, setRemindedTimes] = useState<Record<string, number[]>>(() => {
     try {
       const raw = localStorage.getItem(`rallyhub_reminders_${uid}`);
-      return raw ? (JSON.parse(raw) as Record<string, number>) : {};
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, number | number[]>;
+      const normalized: Record<string, number[]> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          normalized[k] = [v];
+        } else if (Array.isArray(v)) {
+          const valid = v.filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
+          if (valid.length > 0) normalized[k] = Array.from(new Set(valid)).sort((a, b) => a - b);
+        }
+      }
+      return normalized;
     } catch {
       return {};
     }
   });
+  const [inAppNotifications, setInAppNotifications] = useState<InAppReminderNotification[]>([]);
+  const [appBackground, setAppBackground] = useState<string>('default');
+  const [groupBackgroundsById, setGroupBackgroundsById] = useState<Record<string, string>>({});
+  const [groupImagesById, setGroupImagesById] = useState<Record<string, string | null>>({});
+  const [smsPreferences, setSmsPreferences] = useState<SmsPreferences>(DEFAULT_SMS_PREFERENCES);
+  const [smsServerConfigured, setSmsServerConfigured] = useState<boolean>(false);
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
 
   const ensuredCreatorGroupsRef = useRef<Set<string>>(new Set());
+  const deletingGroupIdRef = useRef<string | null>(null);
   const seenNotificationsRef = useRef<Set<string>>(new Set());
   const notificationsInitializedRef = useRef(false);
+  const firedRemindersRef = useRef<Record<string, number> | null>(null);
+  const reminderMetaRef = useRef<
+    Record<
+      string,
+      {
+        title: string;
+        body: string;
+        eventId: string | null;
+        eventStartEpochMs: number | null;
+        eventEndEpochMs: number | null;
+      }
+    >
+  >({});
+
+  const getFiredRemindersMap = useCallback((): Record<string, number> => {
+    if (firedRemindersRef.current) return firedRemindersRef.current;
+    try {
+      const raw = localStorage.getItem(`rallyhub_fired_reminders_${uid}`);
+      const parsed = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+      firedRemindersRef.current = parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      firedRemindersRef.current = {};
+    }
+    return firedRemindersRef.current;
+  }, [uid]);
+
+  const persistFiredRemindersMap = useCallback(
+    (nextMap: Record<string, number>) => {
+      firedRemindersRef.current = nextMap;
+      try {
+        localStorage.setItem(`rallyhub_fired_reminders_${uid}`, JSON.stringify(nextMap));
+      } catch {
+        // Ignore storage errors
+      }
+    },
+    [uid]
+  );
+
+  const clearFiredReminderKeys = useCallback(
+    (itemId: string, triggerAtEpochMs?: number) => {
+      const current = getFiredRemindersMap();
+      const next = { ...current };
+      let changed = false;
+      if (triggerAtEpochMs === undefined) {
+        const prefix = `${itemId}::`;
+        for (const k of Object.keys(next)) {
+          if (k.startsWith(prefix)) {
+            delete next[k];
+            changed = true;
+          }
+        }
+      } else {
+        const key = reminderTimerKey(itemId, triggerAtEpochMs);
+        if (key in next) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      if (changed) {
+        persistFiredRemindersMap(next);
+      }
+      setInAppNotifications((prev) =>
+        prev.filter((n) =>
+          triggerAtEpochMs === undefined
+            ? n.itemId !== itemId
+            : n.id !== reminderTimerKey(itemId, triggerAtEpochMs)
+        )
+      );
+    },
+    [getFiredRemindersMap, persistFiredRemindersMap]
+  );
+
+  const fireInAppReminder = useCallback(
+    (params: {
+      itemId: string;
+      eventId: string | null;
+      title: string;
+      body: string;
+      eventStartEpochMs: number | null;
+      triggerAtEpochMs: number;
+    }) => {
+      const key = reminderTimerKey(params.itemId, params.triggerAtEpochMs);
+      const firedMap = getFiredRemindersMap();
+      if (key in firedMap) return;
+      const now = Date.now();
+      persistFiredRemindersMap({ ...firedMap, [key]: now });
+      postBrowserNotification(params.title, params.body);
+      setInAppNotifications((prev) => {
+        if (prev.some((n) => n.id === key)) return prev;
+        return [
+          {
+            id: key,
+            itemId: params.itemId,
+            eventId: params.eventId,
+            title: params.title,
+            body: params.body,
+            eventStartEpochMs: params.eventStartEpochMs,
+            triggerAtEpochMs: Math.round(params.triggerAtEpochMs),
+            triggeredAtMs: now,
+          },
+          ...prev,
+        ];
+      });
+    },
+    [getFiredRemindersMap, persistFiredRemindersMap]
+  );
 
   // Sync reminders to localStorage
   useEffect(() => {
@@ -223,6 +417,33 @@ export function useRallyWorkspace(
     });
   }, [uid]);
 
+  // Observe main app interface appearance
+  useEffect(() => {
+    return repo.subscribeAppAppearance(
+      (bg) => setAppBackground(bg),
+      () => {}
+    );
+  }, []);
+
+  // Observe user SMS preferences & check SMS server availability
+  useEffect(() => {
+    return repo.subscribeUserSmsPreferences(
+      uid,
+      (prefs) => setSmsPreferences(prefs),
+      () => {}
+    );
+  }, [uid]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void smsService.fetchSmsServerStatus().then((res) => {
+      if (!cancelled) setSmsServerConfigured(res.configured);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Observe joined groups
   useEffect(() => {
     const unsub = repo.subscribeJoinedGroups(
@@ -232,6 +453,43 @@ export function useRallyWorkspace(
     );
     return unsub;
   }, [uid]);
+
+  // Keep groupBackgroundsById live across joined groups (up to 25)
+  const joinedGroupIdsKey = useMemo(
+    () =>
+      joinedGroups
+        .slice(0, 25)
+        .map((g) => g.groupId)
+        .join(','),
+    [joinedGroups]
+  );
+
+  useEffect(() => {
+    if (!joinedGroupIdsKey) return;
+    const ids = joinedGroupIdsKey.split(',').filter(Boolean);
+    const unsubs = ids.map((gid) =>
+      repo.subscribeGroup(
+        gid,
+        (grp) => {
+          if (!grp) return;
+          const nextBg = grp.groupBackground ?? 'default';
+          setGroupBackgroundsById((prev) => {
+            if (prev[gid] === nextBg) return prev;
+            return { ...prev, [gid]: nextBg };
+          });
+          const nextImg = grp.groupImageUrl ?? null;
+          setGroupImagesById((prev) => {
+            if (prev[gid] === nextImg) return prev;
+            return { ...prev, [gid]: nextImg };
+          });
+        },
+        () => {}
+      )
+    );
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [joinedGroupIdsKey]);
 
   const effectiveGroupId = useMemo(() => {
     if (selectedGroupId && joinedGroups.some((g) => g.groupId === selectedGroupId)) {
@@ -246,7 +504,16 @@ export function useRallyWorkspace(
     const targetGroupId = effectiveGroupId;
     const unsubGroup = repo.subscribeGroup(
       targetGroupId,
-      (group) => setActiveGroupEntry({ groupId: targetGroupId, group }),
+      (group) => {
+        setActiveGroupEntry({ groupId: targetGroupId, group });
+        if (group === null && deletingGroupIdRef.current !== targetGroupId) {
+          void repo.removeJoinedGroupRef(targetGroupId).catch(() => {});
+          setSelectedGroupId(null);
+          setSelectedEventId(null);
+          setSelectedChannelId(null);
+          setBannerMessage('That group was deleted and removed from your list.');
+        }
+      },
       (err) => setBannerMessage(getFriendlyErrorMessage(err, 'Error observing group'))
     );
     const unsubMembers = repo.subscribeMembers(
@@ -292,6 +559,116 @@ export function useRallyWorkspace(
     if (eventsEntry?.groupId === effectiveGroupId) return eventsEntry.state;
     return { status: 'loading' };
   }, [effectiveGroupId, eventsEntry]);
+
+  // Arm timers & run periodic catch-up check for persisted reminders -> triggers in-app & browser notifications
+  useEffect(() => {
+    const loadedEvents = eventsState.status === 'success' ? eventsState.data : [];
+    const eventsById = new Map(loadedEvents.map((evt) => [evt.id, evt]));
+
+    const syncAndCheckReminders = (allowImmediateFire: boolean) => {
+      const now = Date.now();
+      const firedMap = getFiredRemindersMap();
+
+      for (const [itemId, timestamps] of Object.entries(remindedTimes)) {
+        const evt = eventsById.get(itemId);
+        const meta = reminderMetaRef.current[itemId];
+        if (!evt && !meta) continue;
+
+        for (const rawTs of timestamps) {
+          const ts = Math.round(rawTs);
+          const key = reminderTimerKey(itemId, ts);
+          if (key in firedMap) continue;
+
+          let notifTitle = meta?.title ?? 'Upcoming Reminder';
+          let notifBody = meta?.body ?? 'Scheduled RallyHub reminder';
+          let eventId: string | null = meta?.eventId ?? null;
+          let eventStartEpochMs: number | null = meta?.eventStartEpochMs ?? null;
+          let windowEndMs = meta?.eventEndEpochMs ?? ts + 24 * 60 * 60_000;
+
+          if (evt) {
+            eventId = evt.id;
+            eventStartEpochMs = evt.startEpochMs;
+            windowEndMs = evt.endEpochMs;
+            const minsUntilStart = Math.max(0, Math.ceil((evt.startEpochMs - now) / 60_000));
+            if (evt.startEpochMs <= now) {
+              notifTitle = 'Event In Progress';
+            } else if (minsUntilStart === 30) {
+              notifTitle = 'Event Starting in 30 Minutes';
+            } else if (minsUntilStart <= 1) {
+              notifTitle = 'Event Starting Now';
+            } else if (minsUntilStart < 60) {
+              notifTitle = `Event Starting in ${minsUntilStart} Minutes`;
+            } else {
+              notifTitle = `Event Reminder: ${evt.title}`;
+            }
+            notifBody = `${evt.title} • ${formatDateTime(evt.startEpochMs)} • ${evt.location}`;
+          }
+
+          if (now >= windowEndMs) continue;
+
+          if (ts <= now) {
+            if (allowImmediateFire) {
+              fireInAppReminder({
+                itemId,
+                eventId,
+                title: notifTitle,
+                body: notifBody,
+                eventStartEpochMs,
+                triggerAtEpochMs: ts,
+              });
+            } else {
+              scheduleBrowserReminder(itemId, notifTitle, notifBody, now, () => {
+                fireInAppReminder({
+                  itemId,
+                  eventId,
+                  title: notifTitle,
+                  body: notifBody,
+                  eventStartEpochMs,
+                  triggerAtEpochMs: ts,
+                });
+              });
+            }
+          } else {
+            scheduleBrowserReminder(itemId, notifTitle, notifBody, ts, () => {
+              const fireNow = Date.now();
+              const freshEvt = eventsById.get(itemId);
+              const freshTitle = freshEvt
+                ? (() => {
+                    const mins = Math.max(
+                      1,
+                      Math.ceil((freshEvt.startEpochMs - fireNow) / 60_000)
+                    );
+                    return mins === 30
+                      ? 'Event Starting in 30 Minutes'
+                      : `Event Starting in ${mins} Minute${mins === 1 ? '' : 's'}`;
+                  })()
+                : notifTitle;
+              const freshBody = freshEvt
+                ? `${freshEvt.title} • ${formatDateTime(freshEvt.startEpochMs)} • ${freshEvt.location}`
+                : notifBody;
+              fireInAppReminder({
+                itemId,
+                eventId,
+                title: freshTitle,
+                body: freshBody,
+                eventStartEpochMs,
+                triggerAtEpochMs: ts,
+              });
+            });
+          }
+        }
+      }
+    };
+
+    syncAndCheckReminders(false);
+    const intervalId = window.setInterval(() => {
+      syncAndCheckReminders(true);
+    }, 15_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [remindedTimes, eventsState, fireInAppReminder, getFiredRemindersMap]);
 
   const fallbackName =
     user.displayName?.trim() || user.email?.split('@')[0]?.trim() || 'Member';
@@ -398,13 +775,10 @@ export function useRallyWorkspace(
     return { status: 'loading' };
   }, [effectiveGroupId, selectedEventId, eventTasksEntry]);
 
-  // Keep tasks loaded for up to 10 upcoming events for Dashboard & Analytics
+  // Keep tasks loaded across all group events for Dashboard & Analytics
   const upcomingEventIdsKey = useMemo(() => {
     if (eventsState.status !== 'success') return '';
-    return eventsState.data
-      .slice(0, 10)
-      .map((e) => e.id)
-      .join(',');
+    return eventsState.data.map((e) => e.id).join(',');
   }, [eventsState]);
 
   useEffect(() => {
@@ -517,6 +891,32 @@ export function useRallyWorkspace(
     return { status: 'loading' };
   }, [effectiveGroupId, currentRole, uid, notificationsEntry]);
 
+  // Observe group activity logs for managers (Organizers, Admins, Creator)
+  const canViewActivityLog = ROLE_META[currentRole].canManageEventsAndTasks;
+  useEffect(() => {
+    if (!effectiveGroupId || !canViewActivityLog) return;
+    const subKey = `${effectiveGroupId}:${currentRole}`;
+    return repo.subscribeActivityLogs(
+      effectiveGroupId,
+      (logs) => setActivityLogsEntry({ key: subKey, state: { status: 'success', data: logs } }),
+      (err) =>
+        setActivityLogsEntry({
+          key: subKey,
+          state: {
+            status: 'error',
+            message: getFriendlyErrorMessage(err, 'Error loading activity log'),
+          },
+        })
+    );
+  }, [effectiveGroupId, canViewActivityLog, currentRole]);
+
+  const activityLogsState: AsyncDataState<GroupActivityLog[]> = useMemo(() => {
+    if (!effectiveGroupId || !canViewActivityLog) return { status: 'success', data: [] };
+    const subKey = `${effectiveGroupId}:${currentRole}`;
+    if (activityLogsEntry?.key === subKey) return activityLogsEntry.state;
+    return { status: 'loading' };
+  }, [effectiveGroupId, canViewActivityLog, currentRole, activityLogsEntry]);
+
   // Observe messages for selected channel
   useEffect(() => {
     if (!effectiveGroupId || !selectedChannelId) return;
@@ -542,6 +942,20 @@ export function useRallyWorkspace(
     if (messagesEntry?.key === subKey) return messagesEntry.state;
     return { status: 'loading' };
   }, [effectiveGroupId, selectedChannelId, messagesEntry]);
+
+  // Keep SMS notification subscriptions synced to server store
+  useEffect(() => {
+    if (joinedGroups.length === 0) return;
+    if (!smsPreferences.phone && !smsPreferences.enabled) return;
+    const memberships = joinedGroups.map((g) => ({
+      groupId: g.groupId,
+      role: g.groupId === activeGroup?.id ? currentRole : g.role,
+    }));
+    void smsService
+      .syncSmsSubscriptionsToServer(memberships, smsPreferences)
+      .then((res) => setSmsServerConfigured(res.configured))
+      .catch(() => {});
+  }, [joinedGroups, smsPreferences, activeGroup?.id, currentRole]);
 
   const switchGroup = useCallback((groupId: string) => {
     notificationsInitializedRef.current = false;
@@ -606,11 +1020,34 @@ export function useRallyWorkspace(
       totalNotifications: notifications.length,
       channelActivity: [...channels]
         .sort((a, b) => b.messageCount - a.messageCount)
-        .slice(0, 5)
         .map((c) => ({ name: c.name, count: c.messageCount })),
       fillRatePercent,
     };
   }, [normalizedMembersState, eventsState, channelsState, notificationsState, allTasksByEvent]);
+
+  const logActivity = useCallback(
+    (
+      groupId: string,
+      category: ActivityCategory,
+      action: ActivityAction,
+      summary: string,
+      details?: string | null,
+      targetId?: string | null
+    ) => {
+      void repo
+        .recordActivityLog(groupId, {
+          actorName: currentUserName,
+          actorRole: currentRole,
+          category,
+          action,
+          summary,
+          details,
+          targetId,
+        })
+        .catch(() => {});
+    },
+    [currentUserName, currentRole]
+  );
 
   const actions: RallyWorkspaceActions = useMemo(
     () => ({
@@ -618,14 +1055,29 @@ export function useRallyWorkspace(
       selectChannel: (channelId) => setSelectedChannelId(channelId),
       switchGroup,
       joinGroupByCode,
-      createGroupWithCode: async (name, description, groupCode) => {
+      createGroupWithCode: async (
+        name,
+        description,
+        groupCode,
+        switchAfterCreate = true,
+        groupImageUrl = null
+      ) => {
         setIsBusy(true);
         try {
-          const newGroupId = await repo.createGroupWithCode(name, description, groupCode);
-          switchGroup(newGroupId);
+          const newGroupId = await repo.createGroupWithCode(
+            name,
+            description,
+            groupCode,
+            groupImageUrl
+          );
+          if (switchAfterCreate) {
+            switchGroup(newGroupId);
+          }
           setBannerMessage(`Group created with code ${repo.normalizeGroupCode(groupCode)}`);
+          return true;
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to create group'));
+          return false;
         } finally {
           setIsBusy(false);
         }
@@ -639,6 +1091,14 @@ export function useRallyWorkspace(
             activeGroup.groupCode,
             newCode,
             activeGroup.name
+          );
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.GROUP,
+            ActivityAction.GROUP_UPDATED,
+            `Updated invite code to ${updated}`,
+            `Group: ${activeGroup.name}`,
+            activeGroup.id
           );
           setBannerMessage(`Group code updated to ${updated}`);
         } catch (err) {
@@ -658,10 +1118,141 @@ export function useRallyWorkspace(
         setIsBusy(true);
         try {
           await repo.updateGroupDetails(activeGroup.id, name, description, activeGroup.groupCode);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.GROUP,
+            ActivityAction.GROUP_UPDATED,
+            `Updated group details for "${name.trim()}"`,
+            description.trim() ? description.trim().slice(0, 120) : null,
+            activeGroup.id
+          );
           setBannerMessage('Group details updated');
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update group'));
         } finally {
+          setIsBusy(false);
+        }
+      },
+      updateAppBackground: async (backgroundSpec) => {
+        const sourceGroupId =
+          (activeGroup && ROLE_META[currentRole].canAccessAdminPanel ? activeGroup.id : null) ??
+          joinedGroups.find((g) => ROLE_META[parseMemberRole(g.role)].canAccessAdminPanel)?.groupId;
+        if (!sourceGroupId) {
+          setBannerMessage('Only Admins or a Group Creator can customize app backgrounds.');
+          return;
+        }
+        setIsBusy(true);
+        try {
+          await repo.updateAppBackground(sourceGroupId, backgroundSpec, currentUserName);
+          if (activeGroup) {
+            logActivity(
+              activeGroup.id,
+              ActivityCategory.GROUP,
+              ActivityAction.GROUP_UPDATED,
+              'Updated main app interface background',
+              describeBackgroundSpec(backgroundSpec),
+              activeGroup.id
+            );
+          }
+          setBannerMessage('Main app interface background updated');
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update app background'));
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      updateGroupBackground: async (groupId, backgroundSpec) => {
+        const isCurrentAdmin =
+          groupId === activeGroup?.id && ROLE_META[currentRole].canAccessAdminPanel;
+        const ref = joinedGroups.find((g) => g.groupId === groupId);
+        const isJoinedAdmin = ref ? ROLE_META[parseMemberRole(ref.role)].canAccessAdminPanel : false;
+        if (!isCurrentAdmin && !isJoinedAdmin) {
+          setBannerMessage('Only Admins or the Group Creator can customize group backgrounds.');
+          return;
+        }
+        setIsBusy(true);
+        try {
+          await repo.updateGroupBackground(groupId, backgroundSpec);
+          setGroupBackgroundsById((prev) => ({ ...prev, [groupId]: backgroundSpec }));
+          if (groupId === activeGroup?.id) {
+            logActivity(
+              groupId,
+              ActivityCategory.GROUP,
+              ActivityAction.GROUP_UPDATED,
+              'Updated group header background',
+              describeBackgroundSpec(backgroundSpec),
+              groupId
+            );
+          }
+          setBannerMessage('Group background updated');
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update group background'));
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      updateGroupImage: async (groupId, groupImageUrl) => {
+        const isCurrentCreator =
+          groupId === activeGroup?.id && ROLE_META[currentRole].isCreator;
+        const ref = joinedGroups.find((g) => g.groupId === groupId);
+        const isJoinedCreator = ref
+          ? parseMemberRole(ref.role) === MemberRole.CREATOR
+          : false;
+        if (!isCurrentCreator && !isJoinedCreator) {
+          setBannerMessage('Only the Group Creator can update the group profile image.');
+          return false;
+        }
+        setIsBusy(true);
+        try {
+          await repo.updateGroupImage(groupId, groupImageUrl);
+          const clean = groupImageUrl?.trim() || null;
+          setGroupImagesById((prev) => ({ ...prev, [groupId]: clean }));
+          if (groupId === activeGroup?.id) {
+            logActivity(
+              groupId,
+              ActivityCategory.GROUP,
+              ActivityAction.GROUP_UPDATED,
+              clean ? 'Updated group profile image' : 'Removed group profile image',
+              clean
+                ? clean.startsWith('data:')
+                  ? 'Uploaded custom image'
+                  : clean.slice(0, 140)
+                : 'Reset to group initials',
+              groupId
+            );
+          }
+          setBannerMessage(
+            clean ? 'Group profile image updated' : 'Group profile image removed'
+          );
+          return true;
+        } catch (err) {
+          setBannerMessage(
+            getFriendlyErrorMessage(err, 'Only the Group Creator can update the group profile image')
+          );
+          return false;
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      deleteGroup: async (groupId, groupCode) => {
+        setIsBusy(true);
+        deletingGroupIdRef.current = groupId;
+        try {
+          await repo.deleteGroup(groupId, groupCode);
+          if (selectedGroupId === groupId) {
+            setSelectedGroupId(null);
+            setSelectedEventId(null);
+            setSelectedChannelId(null);
+          }
+          setBannerMessage('Group deleted');
+        } catch (err) {
+          setBannerMessage(
+            getFriendlyErrorMessage(err, 'Only the Group Creator can delete this group')
+          );
+        } finally {
+          if (deletingGroupIdRef.current === groupId) {
+            deletingGroupIdRef.current = null;
+          }
           setIsBusy(false);
         }
       },
@@ -675,10 +1266,10 @@ export function useRallyWorkspace(
         }
       },
       createEvent: async (title, description, location, category, startEpochMs, endEpochMs) => {
-        if (!activeGroup) return;
+        if (!activeGroup) return false;
         setIsBusy(true);
         try {
-          await repo.createEvent(
+          const eventId = await repo.createEvent(
             activeGroup.id,
             title,
             description,
@@ -688,9 +1279,27 @@ export function useRallyWorkspace(
             endEpochMs,
             currentUserName
           );
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.CALENDAR,
+            ActivityAction.EVENT_CREATED,
+            `Scheduled event "${title.trim()}"`,
+            `${location.trim()} • ${category.trim() || 'General'}`,
+            eventId
+          );
           setBannerMessage(`Event '${title}' added to calendar`);
+          void smsService.dispatchSmsNotification({
+            groupId: activeGroup.id,
+            groupName: activeGroup.name,
+            kind: 'event',
+            title: title.trim(),
+            body: `${formatDateTime(startEpochMs)} @ ${location.trim()}`,
+            senderName: currentUserName,
+          });
+          return true;
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to create event'));
+          return false;
         } finally {
           setIsBusy(false);
         }
@@ -718,18 +1327,80 @@ export function useRallyWorkspace(
             endEpochMs,
             currentUserName
           );
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.CALENDAR,
+            ActivityAction.EVENT_UPDATED,
+            `Updated calendar event "${title.trim()}"`,
+            `${location.trim()} • ${category.trim() || 'General'}`,
+            eventId
+          );
           setBannerMessage(`Event '${title}' updated`);
+          void smsService.dispatchSmsNotification({
+            groupId: activeGroup.id,
+            groupName: activeGroup.name,
+            kind: 'event',
+            title: `Updated: ${title.trim()}`,
+            body: `${formatDateTime(startEpochMs)} @ ${location.trim()}`,
+            senderName: currentUserName,
+          });
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update event'));
         } finally {
           setIsBusy(false);
         }
       },
-      createTask: async (eventId, title, description, deadlineEpochMs, capacity, chatChannelId) => {
+      deleteEvent: async (eventId) => {
         if (!activeGroup) return;
         setIsBusy(true);
+        const existingEvent =
+          eventsState.status === 'success'
+            ? eventsState.data.find((e) => e.id === eventId)
+            : undefined;
         try {
-          await repo.createTask(
+          const childTasks = allTasksByEvent[eventId] ?? [];
+          await repo.deleteEvent(activeGroup.id, eventId);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.CALENDAR,
+            ActivityAction.EVENT_DELETED,
+            `Removed calendar event "${existingEvent?.title ?? 'Event'}"`,
+            existingEvent?.location ?? null,
+            eventId
+          );
+          setSelectedEventId((prev) => (prev === eventId ? null : prev));
+          cancelBrowserReminder(eventId);
+          clearFiredReminderKeys(eventId);
+          childTasks.forEach((t) => {
+            cancelBrowserReminder(t.id);
+            clearFiredReminderKeys(t.id);
+          });
+          setRemindedTimes((prev) => {
+            const next = { ...prev };
+            delete next[eventId];
+            childTasks.forEach((t) => {
+              delete next[t.id];
+            });
+            return next;
+          });
+          setBannerMessage('Event deleted');
+        } catch (err) {
+          setBannerMessage(
+            getFriendlyErrorMessage(err, 'Only an Admin or event creator can delete this event')
+          );
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      createTask: async (eventId, title, description, deadlineEpochMs, capacity, chatChannelId) => {
+        if (!activeGroup) return false;
+        setIsBusy(true);
+        const parentEvent =
+          eventsState.status === 'success'
+            ? eventsState.data.find((e) => e.id === eventId)
+            : undefined;
+        try {
+          const taskId = await repo.createTask(
             activeGroup.id,
             eventId,
             title,
@@ -738,9 +1409,19 @@ export function useRallyWorkspace(
             capacity,
             chatChannelId
           );
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.TASK,
+            ActivityAction.TASK_CREATED,
+            `Created task "${title.trim()}"`,
+            `${parentEvent ? `${parentEvent.title} • ` : ''}${capacity} volunteer slots`,
+            taskId
+          );
           setBannerMessage(`Task '${title}' published`);
+          return true;
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to create task'));
+          return false;
         } finally {
           setIsBusy(false);
         }
@@ -758,6 +1439,10 @@ export function useRallyWorkspace(
         if (!activeGroup) return;
         const existing = allTasksByEvent[eventId]?.find((t) => t.id === taskId);
         const assignedCount = existing?.assignedCount ?? 0;
+        const parentEvent =
+          eventsState.status === 'success'
+            ? eventsState.data.find((e) => e.id === eventId)
+            : undefined;
         setIsBusy(true);
         try {
           await repo.updateTask(
@@ -772,6 +1457,15 @@ export function useRallyWorkspace(
             status,
             chatChannelId
           );
+          const isCompleted = status === TaskStatus.COMPLETED;
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.TASK,
+            isCompleted ? ActivityAction.TASK_COMPLETED : ActivityAction.TASK_UPDATED,
+            isCompleted ? `Completed task "${title.trim()}"` : `Updated task "${title.trim()}"`,
+            `${parentEvent ? `${parentEvent.title} • ` : ''}${assignedCount}/${capacity} filled`,
+            taskId
+          );
           setBannerMessage(`Task '${title}' updated`);
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update task'));
@@ -779,8 +1473,43 @@ export function useRallyWorkspace(
           setIsBusy(false);
         }
       },
+      deleteTask: async (eventId, taskId) => {
+        if (!activeGroup) return;
+        setIsBusy(true);
+        const existingTask = allTasksByEvent[eventId]?.find((t) => t.id === taskId);
+        try {
+          await repo.deleteTask(activeGroup.id, eventId, taskId);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.TASK,
+            ActivityAction.TASK_DELETED,
+            `Deleted task "${existingTask?.title ?? 'Task'}"`,
+            null,
+            taskId
+          );
+          cancelBrowserReminder(taskId);
+          setRemindedTimes((prev) => {
+            if (!(taskId in prev)) return prev;
+            const next = { ...prev };
+            delete next[taskId];
+            return next;
+          });
+          setBannerMessage('Task deleted');
+        } catch (err) {
+          setBannerMessage(
+            getFriendlyErrorMessage(err, 'Only an Admin or task creator can delete this task')
+          );
+        } finally {
+          setIsBusy(false);
+        }
+      },
       toggleTaskSignup: async (eventId, taskId) => {
         if (!activeGroup) return;
+        const existingTask = allTasksByEvent[eventId]?.find((t) => t.id === taskId);
+        const parentEvent =
+          eventsState.status === 'success'
+            ? eventsState.data.find((e) => e.id === eventId)
+            : undefined;
         try {
           const claimed = await repo.toggleTaskSignup(
             activeGroup.id,
@@ -788,19 +1517,39 @@ export function useRallyWorkspace(
             taskId,
             currentUserName
           );
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.TASK,
+            claimed ? ActivityAction.TASK_CLAIMED : ActivityAction.TASK_RELEASED,
+            claimed
+              ? `Signed up for "${existingTask?.title ?? 'task shift'}"`
+              : `Left shift for "${existingTask?.title ?? 'task shift'}"`,
+            parentEvent ? `Event: ${parentEvent.title}` : null,
+            taskId
+          );
           setBannerMessage(claimed ? 'Signed up for task!' : 'Removed from task shift');
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Could not update task signup'));
         }
       },
       createChannel: async (name, description, accessLevel) => {
-        if (!activeGroup) return;
+        if (!activeGroup) return false;
         setIsBusy(true);
         try {
-          await repo.createChannel(activeGroup.id, name, description, accessLevel);
+          const channelId = await repo.createChannel(activeGroup.id, name, description, accessLevel);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.CHANNEL,
+            ActivityAction.CHANNEL_CREATED,
+            `Created chat channel #${name.trim()}`,
+            `Access: ${accessLevel}`,
+            channelId
+          );
           setBannerMessage(`Created #${name.trim()} channel`);
+          return true;
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to create channel'));
+          return false;
         } finally {
           setIsBusy(false);
         }
@@ -810,6 +1559,14 @@ export function useRallyWorkspace(
         setIsBusy(true);
         try {
           await repo.updateChannel(activeGroup.id, channelId, name, description, accessLevel);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.CHANNEL,
+            ActivityAction.CHANNEL_UPDATED,
+            `Updated chat channel #${name.trim()}`,
+            `Access: ${accessLevel}`,
+            channelId
+          );
           setBannerMessage(`Updated #${name.trim()} channel`);
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update channel'));
@@ -817,8 +1574,45 @@ export function useRallyWorkspace(
           setIsBusy(false);
         }
       },
+      deleteChannel: async (channelId) => {
+        if (!activeGroup) return;
+        if (!ROLE_META[currentRole].canAccessAdminPanel) {
+          setBannerMessage('Only Admins or the Group Creator can delete messaging groups.');
+          return;
+        }
+        const existingChannel =
+          channelsState.status === 'success'
+            ? channelsState.data.find((c) => c.id === channelId)
+            : undefined;
+        setIsBusy(true);
+        try {
+          await repo.deleteChannel(activeGroup.id, channelId);
+          setSelectedChannelId((prev) => (prev === channelId ? null : prev));
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.CHANNEL,
+            ActivityAction.CHANNEL_DELETED,
+            `Deleted messaging channel #${existingChannel?.name ?? 'channel'}`,
+            null,
+            channelId
+          );
+          setBannerMessage(
+            `Deleted #${existingChannel?.name ?? 'channel'} messaging group`
+          );
+        } catch (err) {
+          setBannerMessage(
+            getFriendlyErrorMessage(err, 'Only Admins or the Group Creator can delete channels')
+          );
+        } finally {
+          setIsBusy(false);
+        }
+      },
       sendMessage: async (channelId, text) => {
         if (!activeGroup) return;
+        const targetChannel =
+          channelsState.status === 'success'
+            ? channelsState.data.find((c) => c.id === channelId)
+            : undefined;
         try {
           await repo.sendMessage(
             activeGroup.id,
@@ -828,6 +1622,15 @@ export function useRallyWorkspace(
             text,
             MessageType.TEXT
           );
+          void smsService.dispatchSmsNotification({
+            groupId: activeGroup.id,
+            groupName: activeGroup.name,
+            kind: 'message',
+            title: targetChannel ? `#${targetChannel.name}` : 'Group Chat',
+            body: text.trim(),
+            senderName: currentUserName,
+            channelAccessLevel: targetChannel?.accessLevel ?? 'ALL',
+          });
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to send message'));
         }
@@ -865,7 +1668,7 @@ export function useRallyWorkspace(
         targetEventId,
         scheduledForEpochMs = null,
       }) => {
-        if (!activeGroup) return;
+        if (!activeGroup) return false;
         const needsApproval =
           type === NotificationType.ANNOUNCEMENT && !ROLE_META[currentRole].canAccessAdminPanel;
         const resolvedScope = needsApproval ? 'ALL' : targetScope;
@@ -874,7 +1677,7 @@ export function useRallyWorkspace(
 
         setIsBusy(true);
         try {
-          await repo.sendNotification(
+          const notifId = await repo.sendNotification(
             activeGroup.id,
             title,
             body,
@@ -888,13 +1691,25 @@ export function useRallyWorkspace(
             scheduledForEpochMs,
             resolvedStatus
           );
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.ALERT,
+            ActivityAction.ALERT_SENT,
+            needsApproval
+              ? `Submitted announcement "${title.trim()}" for approval`
+              : `Posted alert "${title.trim()}"`,
+            needsApproval ? 'Pending Admin review' : `Target: ${targetChannelName ?? targetRole}`,
+            notifId
+          );
           setBannerMessage(
             needsApproval
               ? 'Announcement submitted for Admin approval before posting'
               : `Alert dispatched to ${targetChannelName ?? targetRole}`
           );
+          return true;
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to send alert'));
+          return false;
         } finally {
           setIsBusy(false);
         }
@@ -942,9 +1757,21 @@ export function useRallyWorkspace(
           setBannerMessage('Only an Admin can approve announcements.');
           return;
         }
+        const existingNotif =
+          notificationsState.status === 'success'
+            ? notificationsState.data.find((n) => n.id === notificationId)
+            : undefined;
         setIsBusy(true);
         try {
           await repo.approveNotification(activeGroup.id, notificationId);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.ALERT,
+            ActivityAction.ALERT_APPROVED,
+            `Approved announcement "${existingNotif?.title ?? 'Announcement'}"`,
+            existingNotif ? `Submitted by ${existingNotif.senderName}` : null,
+            notificationId
+          );
           setBannerMessage('Announcement approved and posted to everyone!');
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to approve announcement'));
@@ -958,8 +1785,20 @@ export function useRallyWorkspace(
           setBannerMessage('Only an Admin can delete announcements.');
           return;
         }
+        const existingNotif =
+          notificationsState.status === 'success'
+            ? notificationsState.data.find((n) => n.id === notificationId)
+            : undefined;
         try {
           await repo.deleteNotification(activeGroup.id, notificationId);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.ALERT,
+            ActivityAction.ALERT_DELETED,
+            `Deleted alert "${existingNotif?.title ?? 'Announcement'}"`,
+            null,
+            notificationId
+          );
           setBannerMessage('Announcement deleted');
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to delete announcement'));
@@ -967,26 +1806,353 @@ export function useRallyWorkspace(
       },
       updateMemberRole: async (memberUid, newRole) => {
         if (!activeGroup) return;
+        const targetMember =
+          normalizedMembersState.status === 'success'
+            ? normalizedMembersState.data.find((m) => m.uid === memberUid)
+            : undefined;
+        const prevRole = targetMember ? parseMemberRole(targetMember.role) : null;
         try {
           await repo.updateMemberRole(activeGroup.id, memberUid, newRole);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.MEMBER,
+            ActivityAction.MEMBER_ROLE_CHANGED,
+            `Changed ${targetMember?.displayName ?? 'member'}'s role to ${ROLE_META[newRole].label}`,
+            prevRole
+              ? `Previous role: ${ROLE_META[prevRole].label} -> New role: ${ROLE_META[newRole].label}`
+              : null,
+            memberUid
+          );
           setBannerMessage(`Updated member role to ${ROLE_META[newRole].label}`);
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Permission denied updating role'));
         }
       },
-      scheduleOrUpdateReminder: (itemId, title, body, triggerAtEpochMs) => {
-        setRemindedTimes((prev) => ({ ...prev, [itemId]: triggerAtEpochMs }));
-        scheduleBrowserReminder(itemId, title, body, triggerAtEpochMs);
-        setBannerMessage(`Reminder set for ${title}`);
+      removeMember: async (memberUid) => {
+        if (!activeGroup) return;
+        if (!ROLE_META[currentRole].canAccessAdminPanel) {
+          setBannerMessage('Only an Admin or Creator can remove members.');
+          return;
+        }
+        if (memberUid === uid || memberUid === activeGroup.ownerId) {
+          setBannerMessage('Cannot remove yourself or the group creator.');
+          return;
+        }
+        const targetMember =
+          normalizedMembersState.status === 'success'
+            ? normalizedMembersState.data.find((m) => m.uid === memberUid)
+            : undefined;
+        const targetRole = targetMember ? parseMemberRole(targetMember.role) : null;
+        if (!ROLE_META[currentRole].isCreator && targetRole === MemberRole.ADMIN) {
+          setBannerMessage('Only the Group Creator can remove an Admin.');
+          return;
+        }
+        const targetName = targetMember?.displayName ?? 'Member';
+        setIsBusy(true);
+        try {
+          await repo.removeMember(activeGroup.id, memberUid);
+          logActivity(
+            activeGroup.id,
+            ActivityCategory.MEMBER,
+            ActivityAction.MEMBER_DELETED,
+            `Removed ${targetName} from group`,
+            targetRole ? `Previous role: ${ROLE_META[targetRole].label}` : null,
+            memberUid
+          );
+          setBannerMessage(`Removed ${targetName} from the group`);
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Permission denied removing member'));
+        } finally {
+          setIsBusy(false);
+        }
       },
-      removeReminder: (itemId) => {
+      scheduleOrUpdateReminder: (itemId, title, body, triggerAtEpochMs) => {
+        const rounded = Math.round(triggerAtEpochMs);
+        const loadedEvents = eventsState.status === 'success' ? eventsState.data : [];
+        const matchedEvent = loadedEvents.find((e) => e.id === itemId);
+        reminderMetaRef.current[itemId] = {
+          title,
+          body,
+          eventId: matchedEvent ? matchedEvent.id : null,
+          eventStartEpochMs: matchedEvent ? matchedEvent.startEpochMs : null,
+          eventEndEpochMs: matchedEvent ? matchedEvent.endEpochMs : null,
+        };
+        clearFiredReminderKeys(itemId, rounded);
         setRemindedTimes((prev) => {
+          const existing = prev[itemId] ?? [];
+          if (existing.some((ts) => Math.abs(ts - rounded) < 1000)) return prev;
+          const nextList = [...existing, rounded].sort((a, b) => a - b);
+          return { ...prev, [itemId]: nextList };
+        });
+        if (rounded <= Date.now()) {
+          fireInAppReminder({
+            itemId,
+            eventId: matchedEvent ? matchedEvent.id : null,
+            title,
+            body,
+            eventStartEpochMs: matchedEvent ? matchedEvent.startEpochMs : null,
+            triggerAtEpochMs: rounded,
+          });
+        } else {
+          scheduleBrowserReminder(itemId, title, body, rounded, () =>
+            fireInAppReminder({
+              itemId,
+              eventId: matchedEvent ? matchedEvent.id : null,
+              title,
+              body,
+              eventStartEpochMs: matchedEvent ? matchedEvent.startEpochMs : null,
+              triggerAtEpochMs: rounded,
+            })
+          );
+        }
+        setBannerMessage(`Reminder added for ${title}`);
+      },
+      removeReminder: (itemId, triggerAtEpochMs) => {
+        clearFiredReminderKeys(itemId, triggerAtEpochMs);
+        setRemindedTimes((prev) => {
+          const existing = prev[itemId] ?? [];
+          if (triggerAtEpochMs === undefined) {
+            if (!(itemId in prev)) return prev;
+            const next = { ...prev };
+            delete next[itemId];
+            return next;
+          }
+          const filtered = existing.filter((ts) => ts !== triggerAtEpochMs);
+          if (filtered.length === existing.length) return prev;
           const next = { ...prev };
-          delete next[itemId];
+          if (filtered.length === 0) {
+            delete next[itemId];
+          } else {
+            next[itemId] = filtered;
+          }
           return next;
         });
-        cancelBrowserReminder(itemId);
-        setBannerMessage('Reminder removed');
+        if (triggerAtEpochMs === undefined) {
+          cancelBrowserReminder(itemId);
+          setBannerMessage('Reminders removed');
+        } else {
+          cancelBrowserReminderAt(itemId, triggerAtEpochMs);
+          setBannerMessage('Reminder removed');
+        }
+      },
+      toggleEventReminder30m: (event) => {
+        const now = Date.now();
+        const triggerAtMs = getEvent30mReminderEpochMs(event.startEpochMs);
+        const existingList = remindedTimes[event.id] ?? [];
+        const has30m = isReminderAt30mSet(existingList, event.startEpochMs);
+
+        if (has30m) {
+          const matchingTimestamps = existingList.filter(
+            (ts) => Math.abs(ts - triggerAtMs) < 1000
+          );
+          for (const ts of matchingTimestamps) {
+            cancelBrowserReminderAt(event.id, ts);
+            clearFiredReminderKeys(event.id, ts);
+          }
+          setRemindedTimes((prev) => {
+            const cur = prev[event.id] ?? [];
+            const filtered = cur.filter((ts) => Math.abs(ts - triggerAtMs) >= 1000);
+            if (filtered.length === cur.length) return prev;
+            const next = { ...prev };
+            if (filtered.length === 0) {
+              delete next[event.id];
+            } else {
+              next[event.id] = filtered;
+            }
+            return next;
+          });
+          setBannerMessage(`Remind Me turned off for ${event.title}`);
+          return;
+        }
+
+        if (event.endEpochMs <= now) {
+          setBannerMessage('This event has already ended.');
+          return;
+        }
+        if (event.startEpochMs <= now) {
+          setBannerMessage('This event has already started.');
+          return;
+        }
+
+        const notifTitle = 'Event Starting in 30 Minutes';
+        const notifBody = `${event.title} • ${formatDateTime(event.startEpochMs)} • ${event.location}`;
+        reminderMetaRef.current[event.id] = {
+          title: notifTitle,
+          body: notifBody,
+          eventId: event.id,
+          eventStartEpochMs: event.startEpochMs,
+          eventEndEpochMs: event.endEpochMs,
+        };
+        clearFiredReminderKeys(event.id, triggerAtMs);
+        setRemindedTimes((prev) => {
+          const existing = prev[event.id] ?? [];
+          if (existing.some((ts) => Math.abs(ts - triggerAtMs) < 1000)) return prev;
+          const nextList = [...existing, triggerAtMs].sort((a, b) => a - b);
+          return { ...prev, [event.id]: nextList };
+        });
+
+        if (triggerAtMs <= now) {
+          const minsLeft = Math.max(1, Math.ceil((event.startEpochMs - now) / 60_000));
+          fireInAppReminder({
+            itemId: event.id,
+            eventId: event.id,
+            title: `Event Starting in ${minsLeft} Minute${minsLeft === 1 ? '' : 's'}`,
+            body: `${event.title} • ${formatDateTime(event.startEpochMs)} • ${event.location}`,
+            eventStartEpochMs: event.startEpochMs,
+            triggerAtEpochMs: triggerAtMs,
+          });
+          setBannerMessage(
+            `Remind Me on — "${event.title}" starts in ${minsLeft} min`
+          );
+        } else {
+          scheduleBrowserReminder(event.id, notifTitle, notifBody, triggerAtMs, () => {
+            fireInAppReminder({
+              itemId: event.id,
+              eventId: event.id,
+              title: notifTitle,
+              body: notifBody,
+              eventStartEpochMs: event.startEpochMs,
+              triggerAtEpochMs: triggerAtMs,
+            });
+          });
+          setBannerMessage(
+            `Remind Me on: in-app alert at ${formatDateTime(triggerAtMs)} (30 min before)`
+          );
+        }
+      },
+      dismissInAppNotification: (notificationId) => {
+        setInAppNotifications((prev) => prev.filter((n) => n.id !== notificationId));
+      },
+      dismissAllInAppNotifications: () => {
+        setInAppNotifications([]);
+      },
+      saveSmsPreferences: async (prefs) => {
+        setIsBusy(true);
+        try {
+          const normalizedPhone = prefs.phone.trim()
+            ? smsService.normalizePhoneInput(prefs.phone)
+            : '';
+          if (normalizedPhone && !smsService.E164_PHONE_REGEX.test(normalizedPhone)) {
+            setBannerMessage('Enter a valid mobile number in E.164 format (e.g. +15551234567).');
+            return false;
+          }
+          const nextPrefs: SmsPreferences = {
+            phone: normalizedPhone,
+            enabled: Boolean(prefs.enabled),
+            forMessages: Boolean(prefs.forMessages),
+            forEvents: Boolean(prefs.forEvents),
+          };
+          await repo.saveUserSmsPreferences(nextPrefs);
+          const memberships = joinedGroups.map((g) => ({
+            groupId: g.groupId,
+            role: g.groupId === activeGroup?.id ? currentRole : g.role,
+          }));
+          const syncRes = await smsService.syncSmsSubscriptionsToServer(memberships, nextPrefs);
+          setSmsServerConfigured(syncRes.configured);
+          setBannerMessage(
+            nextPrefs.enabled
+              ? `SMS notifications active for ${normalizedPhone}`
+              : 'SMS notification settings saved'
+          );
+          return true;
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to save SMS preferences'));
+          return false;
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      sendTestSms: async (phone) => {
+        const normalizedPhone = smsService.normalizePhoneInput(phone);
+        if (!smsService.E164_PHONE_REGEX.test(normalizedPhone)) {
+          setBannerMessage('Enter a valid mobile number (e.g. +15551234567) before testing.');
+          return;
+        }
+        setIsBusy(true);
+        try {
+          await smsService.sendTestSms(normalizedPhone, activeGroup?.name);
+          setBannerMessage(`Test SMS sent to ${normalizedPhone}`);
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Could not send test SMS'));
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      exportAuditLogCsv: async (options) => {
+        if (!activeGroup) return 0;
+        if (!ROLE_META[currentRole].canAccessAdminPanel) {
+          setBannerMessage('Only an Admin or Creator can export audit records.');
+          return 0;
+        }
+        setIsBusy(true);
+        try {
+          const members =
+            normalizedMembersState.status === 'success' ? normalizedMembersState.data : [];
+          const fullLogs = await repo.fetchActivityLogsForExport(activeGroup.id);
+          const combined = combineAuditLogsWithOrigin(fullLogs, activeGroup, members);
+          const rows = filterAndSortAuditLogs(
+            combined,
+            options?.scope ?? 'SENSITIVE',
+            options?.searchQuery ?? '',
+            options?.sortOrder ?? 'desc'
+          );
+          const csv = buildAuditLogCsv(rows, activeGroup);
+          const filename = makeDatedCsvFilename(activeGroup.name, 'audit-log');
+          downloadCsvFile(filename, csv);
+          setBannerMessage(
+            `Exported ${rows.length} audit log ${rows.length === 1 ? 'entry' : 'entries'} to CSV`
+          );
+          return rows.length;
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to export audit log CSV'));
+          return 0;
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      exportMembersCsv: (membersOverride) => {
+        if (!activeGroup) return 0;
+        if (!ROLE_META[currentRole].canAccessAdminPanel) {
+          setBannerMessage('Only an Admin or Creator can export membership records.');
+          return 0;
+        }
+        const members =
+          membersOverride ??
+          (normalizedMembersState.status === 'success' ? normalizedMembersState.data : []);
+        const csv = buildGroupMembersCsv(members, activeGroup);
+        const filename = makeDatedCsvFilename(activeGroup.name, 'members');
+        downloadCsvFile(filename, csv);
+        setBannerMessage(
+          `Exported ${members.length} group ${members.length === 1 ? 'member' : 'members'} to CSV`
+        );
+        return members.length;
+      },
+      exportCombinedRecordsCsv: async () => {
+        if (!activeGroup) return false;
+        if (!ROLE_META[currentRole].canAccessAdminPanel) {
+          setBannerMessage('Only an Admin or Creator can export group records.');
+          return false;
+        }
+        setIsBusy(true);
+        try {
+          const members =
+            normalizedMembersState.status === 'success' ? normalizedMembersState.data : [];
+          const fullLogs = await repo.fetchActivityLogsForExport(activeGroup.id);
+          const combined = combineAuditLogsWithOrigin(fullLogs, activeGroup, members);
+          const auditRows = filterAndSortAuditLogs(combined, 'SENSITIVE', '', 'desc');
+          const csv = buildCombinedRecordKeepingCsv(members, auditRows, activeGroup);
+          const filename = makeDatedCsvFilename(activeGroup.name, 'records-combined');
+          downloadCsvFile(filename, csv);
+          setBannerMessage(
+            `Exported ${members.length} members & ${auditRows.length} audit entries to CSV`
+          );
+          return true;
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to export combined CSV report'));
+          return false;
+        } finally {
+          setIsBusy(false);
+        }
       },
       showBanner: (message) => setBannerMessage(message),
       clearBanner: () => setBannerMessage(null),
@@ -999,10 +2165,21 @@ export function useRallyWorkspace(
     [
       activeGroup,
       allTasksByEvent,
+      channelsState,
+      clearFiredReminderKeys,
       currentRole,
       currentUserName,
+      eventsState,
+      fireInAppReminder,
       joinGroupByCode,
+      joinedGroups,
+      logActivity,
+      normalizedMembersState,
+      notificationsState,
+      remindedTimes,
+      selectedGroupId,
       switchGroup,
+      uid,
     ]
   );
 
@@ -1022,9 +2199,16 @@ export function useRallyWorkspace(
     selectedChannelId,
     messagesState,
     notificationsState,
+    activityLogsState,
     membersState: normalizedMembersState,
     analytics,
     remindedTimes,
+    inAppNotifications,
+    appBackground,
+    groupBackgroundsById,
+    groupImagesById,
+    smsPreferences,
+    smsServerConfigured,
     bannerMessage,
     isBusy,
   };

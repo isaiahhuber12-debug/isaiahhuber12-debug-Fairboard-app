@@ -2,8 +2,11 @@ import {
   collection,
   deleteDoc,
   doc,
+  getCountFromServer,
   getDoc,
+  getDocs,
   increment,
+  limit,
   limitToLast,
   onSnapshot,
   orderBy,
@@ -17,14 +20,20 @@ import {
   writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
+import { isValidBackgroundSpec } from '../lib/backgrounds';
+import { isValidGroupImageUrl, normalizeGroupImageInput } from '../lib/groupImages';
 import { auth, db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firestoreError';
 import {
+  ActivityAction,
+  ActivityCategory,
   ApprovalStatus,
   ChannelAccessLevel,
   type ChatChannel,
   type ChatMessage,
+  DEFAULT_SMS_PREFERENCES,
   type EventTask,
+  type GroupActivityLog,
   type GroupMember,
   type HubNotification,
   type JoinedGroupRef,
@@ -33,8 +42,12 @@ import {
   NotificationType,
   type RallyEvent,
   type RallyGroup,
+  type SmsPreferences,
   TaskStatus,
 } from '../types/rally';
+
+export const MAX_GROUP_MEMBERS = 500;
+export const MAX_TASK_CAPACITY = 500;
 
 function makeId(prefix: string, len = 14): string {
   const raw = crypto.randomUUID().replace(/-/g, '').slice(0, len);
@@ -111,6 +124,86 @@ export async function ensureUserProfile(): Promise<void> {
   }
 }
 
+export function subscribeUserSmsPreferences(
+  uid: string,
+  onData: (prefs: SmsPreferences) => void,
+  onError: (err: unknown) => void
+): Unsubscribe {
+  const path = `users/${uid}`;
+  return onSnapshot(
+    doc(db, 'users', uid),
+    (snap) => {
+      if (!snap.exists()) {
+        onData(DEFAULT_SMS_PREFERENCES);
+        return;
+      }
+      const data = snap.data();
+      onData({
+        phone: typeof data.smsPhone === 'string' ? data.smsPhone : '',
+        enabled: Boolean(data.smsEnabled ?? false),
+        forMessages: data.smsForMessages === undefined ? true : Boolean(data.smsForMessages),
+        forEvents: data.smsForEvents === undefined ? true : Boolean(data.smsForEvents),
+      });
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, path);
+      } catch (e) {
+        onError(e);
+      }
+    }
+  );
+}
+
+export async function saveUserSmsPreferences(prefs: SmsPreferences): Promise<void> {
+  const uid = requireUserId();
+  const path = `users/${uid}`;
+  const cleanPhone = prefs.phone.trim();
+  if (cleanPhone && !/^\+[1-9]\d{7,14}$/.test(cleanPhone)) {
+    throw new Error('Phone number must be in E.164 format (e.g. +15551234567).');
+  }
+  if (prefs.enabled && !cleanPhone) {
+    throw new Error('Enter a mobile phone number before enabling SMS notifications.');
+  }
+
+  try {
+    await updateDoc(doc(db, 'users', uid), {
+      smsPhone: cleanPhone || null,
+      smsEnabled: Boolean(prefs.enabled),
+      smsForMessages: Boolean(prefs.forMessages),
+      smsForEvents: Boolean(prefs.forEvents),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export function subscribeAppAppearance(
+  onData: (appBackground: string) => void,
+  onError: (err: unknown) => void
+): Unsubscribe {
+  const path = 'appSettings/appearance';
+  return onSnapshot(
+    doc(db, 'appSettings', 'appearance'),
+    (snap) => {
+      if (!snap.exists()) {
+        onData('default');
+        return;
+      }
+      const raw = snap.data().appBackground;
+      onData(typeof raw === 'string' && isValidBackgroundSpec(raw) ? raw : 'default');
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, path);
+      } catch (e) {
+        onError(e);
+      }
+    }
+  );
+}
+
 export function subscribeJoinedGroups(
   uid: string,
   onData: (groups: JoinedGroupRef[]) => void,
@@ -129,6 +222,10 @@ export function subscribeJoinedGroups(
             groupName: String(data.groupName ?? ''),
             groupCode: String(data.groupCode ?? ''),
             role: String(data.role ?? MemberRole.PARTICIPANT),
+            groupBackground:
+              typeof data.groupBackground === 'string' ? data.groupBackground : null,
+            groupImageUrl:
+              typeof data.groupImageUrl === 'string' ? data.groupImageUrl : null,
             joinedAtMs: tsToMs(data.joinedAt, 0),
             updatedAtMs: tsToMs(data.updatedAt, 0),
           };
@@ -166,6 +263,10 @@ export function subscribeGroup(
         description: String(data.description ?? ''),
         groupCode: String(data.groupCode ?? ''),
         ownerId: String(data.ownerId ?? ''),
+        groupBackground:
+          typeof data.groupBackground === 'string' ? data.groupBackground : null,
+        groupImageUrl:
+          typeof data.groupImageUrl === 'string' ? data.groupImageUrl : null,
         createdAtMs: tsToMs(data.createdAt, 0),
         updatedAtMs: tsToMs(data.updatedAt, 0),
       });
@@ -495,21 +596,143 @@ export function subscribeNotifications(
   };
 }
 
+export function subscribeActivityLogs(
+  groupId: string,
+  onData: (logs: GroupActivityLog[]) => void,
+  onError: (err: unknown) => void,
+  maxEntries = 200
+): Unsubscribe {
+  const path = `groups/${groupId}/activityLogs`;
+  const q = query(
+    collection(db, 'groups', groupId, 'activityLogs'),
+    orderBy('createdAt', 'desc'),
+    limit(maxEntries)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: GroupActivityLog[] = snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          actorId: String(data.actorId ?? ''),
+          actorName: String(data.actorName ?? 'Member'),
+          actorRole: String(data.actorRole ?? MemberRole.PARTICIPANT),
+          category: String(data.category ?? ActivityCategory.TASK),
+          action: String(data.action ?? ActivityAction.TASK_UPDATED),
+          summary: String(data.summary ?? ''),
+          details: typeof data.details === 'string' ? data.details : null,
+          targetId: typeof data.targetId === 'string' ? data.targetId : null,
+          createdAtMs: tsToMs(data.createdAt, Date.now()),
+        };
+      });
+      onData(list);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (e) {
+        onError(e);
+      }
+    }
+  );
+}
+
+export async function fetchActivityLogsForExport(
+  groupId: string,
+  maxEntries = 2000
+): Promise<GroupActivityLog[]> {
+  requireUserId();
+  const path = `groups/${groupId}/activityLogs`;
+  try {
+    const q = query(
+      collection(db, 'groups', groupId, 'activityLogs'),
+      orderBy('createdAt', 'desc'),
+      limit(maxEntries)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        actorId: String(data.actorId ?? ''),
+        actorName: String(data.actorName ?? 'Member'),
+        actorRole: String(data.actorRole ?? MemberRole.PARTICIPANT),
+        category: String(data.category ?? ActivityCategory.TASK),
+        action: String(data.action ?? ActivityAction.TASK_UPDATED),
+        summary: String(data.summary ?? ''),
+        details: typeof data.details === 'string' ? data.details : null,
+        targetId: typeof data.targetId === 'string' ? data.targetId : null,
+        createdAtMs: tsToMs(data.createdAt, Date.now()),
+      };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+export async function recordActivityLog(
+  groupId: string,
+  params: {
+    actorName: string;
+    actorRole: MemberRole;
+    category: ActivityCategory;
+    action: ActivityAction;
+    summary: string;
+    details?: string | null;
+    targetId?: string | null;
+  }
+): Promise<void> {
+  const uid = requireUserId();
+  const logId = makeId('act', 16);
+  const path = `groups/${groupId}/activityLogs/${logId}`;
+  const cleanSummary = params.summary.trim().slice(0, 200);
+  if (cleanSummary.length < 2) return;
+
+  try {
+    const payload: Record<string, unknown> = {
+      actorId: uid,
+      actorName: (params.actorName.trim() || 'Member').slice(0, 60),
+      actorRole: params.actorRole,
+      category: params.category,
+      action: params.action,
+      summary: cleanSummary,
+      createdAt: serverTimestamp(),
+    };
+    const cleanDetails = params.details?.trim().slice(0, 300);
+    if (cleanDetails) {
+      payload.details = cleanDetails;
+    }
+    const cleanTargetId = params.targetId?.trim();
+    if (cleanTargetId && /^[a-zA-Z0-9_-]{1,128}$/.test(cleanTargetId)) {
+      payload.targetId = cleanTargetId;
+    }
+    await setDoc(doc(db, 'groups', groupId, 'activityLogs', logId), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
 export async function createGroupWithCode(
   groupName: StringLike,
   description: string,
-  rawGroupCode: string
+  rawGroupCode: string,
+  groupImageUrl?: string | null
 ): Promise<string> {
   const normalizedCode = normalizeGroupCode(rawGroupCode);
   const groupId = makeId('grp', 16);
   const uid = requireUserId();
   const trimmedName = groupName.trim();
+  const cleanImageUrl = normalizeGroupImageInput(groupImageUrl);
 
   if (trimmedName.length < 2 || trimmedName.length > 80) {
     throw new Error('Group name must be 2–80 characters.');
   }
   if (!/^[A-Z0-9_-]{4,24}$/.test(normalizedCode)) {
     throw new Error('Group code must be 4–24 characters (A–Z, 0–9, -, _).');
+  }
+  if (cleanImageUrl && !isValidGroupImageUrl(cleanImageUrl)) {
+    throw new Error('Group image must be a valid HTTPS URL or uploaded PNG/JPG/WebP/GIF.');
   }
 
   try {
@@ -527,14 +750,18 @@ export async function createGroupWithCode(
     const groupRef = doc(db, 'groups', groupId);
 
     // Step 1: Create group document first so security rules verify ownership
-    await setDoc(groupRef, {
+    const groupPayload: Record<string, unknown> = {
       name: trimmedName,
       description: trimmedDesc,
       groupCode: normalizedCode,
       ownerId: uid,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (cleanImageUrl) {
+      groupPayload.groupImageUrl = cleanImageUrl;
+    }
+    await setDoc(groupRef, groupPayload);
 
     try {
       // Step 2: Claim groupCode and register creator membership
@@ -579,14 +806,18 @@ export async function createGroupWithCode(
       await channelBatch.commit();
 
       // Step 4: Index in user's joinedGroups last
-      await setDoc(doc(db, 'users', uid, 'joinedGroups', groupId), {
+      const joinedPayload: Record<string, unknown> = {
         groupId,
         groupName: trimmedName,
         groupCode: normalizedCode,
         role: MemberRole.CREATOR,
         joinedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (cleanImageUrl) {
+        joinedPayload.groupImageUrl = cleanImageUrl;
+      }
+      await setDoc(doc(db, 'users', uid, 'joinedGroups', groupId), joinedPayload);
     } catch (innerErr) {
       try {
         await deleteDoc(groupRef);
@@ -595,6 +826,16 @@ export async function createGroupWithCode(
       }
       throw innerErr;
     }
+
+    void recordActivityLog(groupId, {
+      actorName: displayName,
+      actorRole: MemberRole.CREATOR,
+      category: ActivityCategory.GROUP,
+      action: ActivityAction.GROUP_CREATED,
+      summary: `Created group "${trimmedName}"`,
+      details: `Invite code ${normalizedCode}`,
+      targetId: groupId,
+    }).catch(() => {});
 
     return groupId;
   } catch (error) {
@@ -692,6 +933,143 @@ export async function updateGroupDetails(
   }
 }
 
+export async function updateAppBackground(
+  sourceGroupId: string,
+  appBackground: string,
+  updatedByName: string
+): Promise<void> {
+  const uid = requireUserId();
+  const path = 'appSettings/appearance';
+  const cleanBg = appBackground.trim();
+  if (!isValidBackgroundSpec(cleanBg)) {
+    throw new Error('Invalid background selection.');
+  }
+
+  try {
+    await setDoc(doc(db, 'appSettings', 'appearance'), {
+      appBackground: cleanBg,
+      sourceGroupId,
+      updatedBy: uid,
+      updatedByName: (updatedByName.trim() || 'Admin').slice(0, 60),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function updateGroupBackground(
+  groupId: string,
+  groupBackground: string
+): Promise<void> {
+  const uid = requireUserId();
+  const path = `groups/${groupId}`;
+  const cleanBg = groupBackground.trim();
+  if (!isValidBackgroundSpec(cleanBg)) {
+    throw new Error('Invalid group background selection.');
+  }
+
+  try {
+    await updateDoc(doc(db, 'groups', groupId), {
+      groupBackground: cleanBg,
+      updatedAt: serverTimestamp(),
+    });
+    try {
+      const joinedRef = doc(db, 'users', uid, 'joinedGroups', groupId);
+      const joinedSnap = await getDoc(joinedRef);
+      if (joinedSnap.exists()) {
+        await updateDoc(joinedRef, {
+          groupBackground: cleanBg,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch {
+      // Best-effort joinedGroups cache sync
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateGroupImage(
+  groupId: string,
+  groupImageUrl: string | null
+): Promise<void> {
+  const uid = requireUserId();
+  const path = `groups/${groupId}`;
+  const cleanImageUrl = normalizeGroupImageInput(groupImageUrl);
+  if (cleanImageUrl !== null && !isValidGroupImageUrl(cleanImageUrl)) {
+    throw new Error('Group image must be a valid HTTPS URL or uploaded PNG/JPG/WebP/GIF.');
+  }
+
+  try {
+    await updateDoc(doc(db, 'groups', groupId), {
+      groupImageUrl: cleanImageUrl,
+      updatedAt: serverTimestamp(),
+    });
+    try {
+      const joinedRef = doc(db, 'users', uid, 'joinedGroups', groupId);
+      const joinedSnap = await getDoc(joinedRef);
+      if (joinedSnap.exists()) {
+        await updateDoc(joinedRef, {
+          groupImageUrl: cleanImageUrl,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch {
+      // Best-effort joinedGroups cache sync
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteGroup(groupId: string, groupCode?: string | null): Promise<void> {
+  const uid = requireUserId();
+  const path = `groups/${groupId}`;
+  try {
+    let codeToDelete = groupCode?.trim() ? normalizeGroupCode(groupCode) : '';
+    if (!codeToDelete) {
+      const groupSnap = await getDoc(doc(db, 'groups', groupId));
+      if (groupSnap.exists()) {
+        codeToDelete = normalizeGroupCode(String(groupSnap.data().groupCode ?? ''));
+      }
+    }
+
+    if (codeToDelete) {
+      try {
+        const codeRef = doc(db, 'groupCodes', codeToDelete);
+        const codeSnap = await getDoc(codeRef);
+        if (codeSnap.exists() && codeSnap.data().groupId === groupId) {
+          await deleteDoc(codeRef);
+        }
+      } catch {
+        // Best-effort invite code cleanup
+      }
+    }
+
+    await deleteDoc(doc(db, 'groups', groupId));
+
+    try {
+      await deleteDoc(doc(db, 'users', uid, 'joinedGroups', groupId));
+    } catch {
+      // Best-effort user index cleanup
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function removeJoinedGroupRef(groupId: string): Promise<void> {
+  const uid = requireUserId();
+  const path = `users/${uid}/joinedGroups/${groupId}`;
+  try {
+    await deleteDoc(doc(db, 'users', uid, 'joinedGroups', groupId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
 export async function updateOwnDisplayName(groupId: string, newDisplayName: string): Promise<void> {
   const uid = requireUserId();
   const path = `groups/${groupId}/members/${uid}`;
@@ -752,9 +1130,8 @@ export async function joinGroupByCode(
     const joinedGroupRef = doc(db, 'users', uid, 'joinedGroups', groupId);
     const existingJoined = await getDoc(joinedGroupRef);
 
-    const batch = writeBatch(db);
     if (!existingMember.exists()) {
-      batch.set(memberRef, {
+      await setDoc(memberRef, {
         uid,
         displayName,
         role: MemberRole.PARTICIPANT,
@@ -763,25 +1140,35 @@ export async function joinGroupByCode(
         joinedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+
+      const countSnap = await getCountFromServer(collection(db, 'groups', groupId, 'members'));
+      if (countSnap.data().count > MAX_GROUP_MEMBERS) {
+        try {
+          await deleteDoc(memberRef);
+        } catch {
+          // Best-effort rollback
+        }
+        throw new Error(`This group has reached its maximum capacity of ${MAX_GROUP_MEMBERS} members.`);
+      }
     } else if (
       displayNameOverride?.trim() &&
       displayName !== existingMember.data().displayName
     ) {
-      batch.update(memberRef, {
+      await updateDoc(memberRef, {
         displayName,
         updatedAt: serverTimestamp(),
       });
     }
 
     if (existingJoined.exists()) {
-      batch.update(joinedGroupRef, {
+      await updateDoc(joinedGroupRef, {
         groupName,
         groupCode: code,
         role: resolvedRole,
         updatedAt: serverTimestamp(),
       });
     } else {
-      batch.set(joinedGroupRef, {
+      await setDoc(joinedGroupRef, {
         groupId,
         groupName,
         groupCode: code,
@@ -790,12 +1177,25 @@ export async function joinGroupByCode(
         updatedAt: serverTimestamp(),
       });
     }
-    await batch.commit();
+
+    if (!existingMember.exists()) {
+      void recordActivityLog(groupId, {
+        actorName: displayName,
+        actorRole: MemberRole.PARTICIPANT,
+        category: ActivityCategory.MEMBER,
+        action: ActivityAction.MEMBER_JOINED,
+        summary: `Joined "${groupName}"`,
+        details: `Invite code ${code}`,
+        targetId: uid,
+      }).catch(() => {});
+    }
     return groupId;
   } catch (error) {
     if (
       error instanceof Error &&
-      (error.message.includes('No active group found') || error.message.includes('Group code'))
+      (error.message.includes('No active group found') ||
+        error.message.includes('Group code') ||
+        error.message.includes('maximum capacity'))
     ) {
       throw error;
     }
@@ -848,6 +1248,22 @@ export async function updateMemberRole(
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function removeMember(
+  groupId: string,
+  targetMemberUid: string
+): Promise<void> {
+  const actorUid = requireUserId();
+  if (targetMemberUid === actorUid) {
+    throw new Error('You cannot remove yourself from the group here.');
+  }
+  const path = `groups/${groupId}/members/${targetMemberUid}`;
+  try {
+    await deleteDoc(doc(db, 'groups', groupId, 'members', targetMemberUid));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 
@@ -936,6 +1352,26 @@ export async function updateEvent(
   }
 }
 
+export async function deleteEvent(groupId: string, eventId: string): Promise<void> {
+  requireUserId();
+  const path = `groups/${groupId}/events/${eventId}`;
+  try {
+    try {
+      const tasksSnap = await getDocs(
+        collection(db, 'groups', groupId, 'events', eventId, 'tasks')
+      );
+      if (!tasksSnap.empty) {
+        await Promise.allSettled(tasksSnap.docs.map((d) => deleteDoc(d.ref)));
+      }
+    } catch {
+      // Proceed to delete event document even if child task cleanup is partial
+    }
+    await deleteDoc(doc(db, 'groups', groupId, 'events', eventId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
 export async function createTask(
   groupId: string,
   eventId: string,
@@ -952,8 +1388,8 @@ export async function createTask(
   if (cleanTitle.length < 2 || cleanTitle.length > 100) {
     throw new Error('Task title must be 2–100 characters.');
   }
-  if (capacity < 1 || capacity > 50) {
-    throw new Error('Capacity must be between 1 and 50.');
+  if (capacity < 1 || capacity > MAX_TASK_CAPACITY) {
+    throw new Error(`Capacity must be between 1 and ${MAX_TASK_CAPACITY}.`);
   }
 
   try {
@@ -1000,8 +1436,8 @@ export async function updateTask(
     throw new Error('Task title must be 2–100 characters.');
   }
   const minCap = Math.max(1, assignedCount);
-  if (capacity < minCap || capacity > 50) {
-    throw new Error(`Capacity must be between ${minCap} and 50.`);
+  if (capacity < minCap || capacity > MAX_TASK_CAPACITY) {
+    throw new Error(`Capacity must be between ${minCap} and ${MAX_TASK_CAPACITY}.`);
   }
   const effectiveStatus =
     status === TaskStatus.COMPLETED
@@ -1022,6 +1458,20 @@ export async function updateTask(
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteTask(
+  groupId: string,
+  eventId: string,
+  taskId: string
+): Promise<void> {
+  requireUserId();
+  const path = `groups/${groupId}/events/${eventId}/tasks/${taskId}`;
+  try {
+    await deleteDoc(doc(db, 'groups', groupId, 'events', eventId, 'tasks', taskId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 
@@ -1171,6 +1621,26 @@ export async function updateChannel(
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteChannel(groupId: string, channelId: string): Promise<void> {
+  requireUserId();
+  const path = `groups/${groupId}/channels/${channelId}`;
+  try {
+    try {
+      const msgsSnap = await getDocs(
+        collection(db, 'groups', groupId, 'channels', channelId, 'messages')
+      );
+      if (!msgsSnap.empty) {
+        await Promise.allSettled(msgsSnap.docs.map((d) => deleteDoc(d.ref)));
+      }
+    } catch {
+      // Proceed to delete channel document even if child message cleanup is partial
+    }
+    await deleteDoc(doc(db, 'groups', groupId, 'channels', channelId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 

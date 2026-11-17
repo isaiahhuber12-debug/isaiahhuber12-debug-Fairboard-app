@@ -1,37 +1,65 @@
 import React, { useMemo, useState } from 'react';
 import {
   ChevronDown,
+  Download,
+  FileSpreadsheet,
+  Lock,
   Megaphone,
+  MessageSquare,
+  Plus,
   Search,
+  ShieldAlert,
+  SlidersHorizontal,
+  Trash2,
   UserCog,
+  UserMinus,
+  X,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
 import {
+  ActivityAction,
+  CHANNEL_ACCESS_LABELS,
+  ChannelAccessLevel,
+  type ChatChannel,
   type GroupMember,
   MemberRole,
+  parseActivityAction,
+  parseChannelAccessLevel,
   parseMemberRole,
   type RallyGroup,
   ROLE_META,
 } from '../../types/rally';
 import {
+  ConfirmDeleteDialog,
   EngagementBarChart,
   FillRateRing,
+  GroupAvatar,
   GroupCodePill,
   MetricStatTile,
   NotificationComposerDialog,
   RoleBadge,
 } from '../RallyComponents';
+import { ActivityLog } from '../ActivityLog';
+import { AdminAuditLog, isSensitiveAuditAction } from '../AdminAuditLog';
+import { BackgroundCustomizerCard } from '../BackgroundCustomizerCard';
+import { GroupImageEditor } from '../GroupImageEditor';
+
+export type AdminPanelSubTab = 'controls' | 'audit';
 
 interface AdminPanelScreenProps {
   state: RallyWorkspaceState;
   actions: RallyWorkspaceActions;
   onCopiedCode: () => void;
+  activeSubTab?: AdminPanelSubTab;
+  onSubTabChange?: (tab: AdminPanelSubTab) => void;
 }
 
 export function AdminPanelScreen({
   state,
   actions,
   onCopiedCode,
+  activeSubTab,
+  onSubTabChange,
 }: AdminPanelScreenProps) {
   const group = state.activeGroup;
   const members = useMemo(
@@ -42,48 +70,284 @@ export function AdminPanelScreen({
   const events = state.eventsState.status === 'success' ? state.eventsState.data : [];
   const isCreator = ROLE_META[state.currentRole].isCreator;
 
+  const [internalTab, setInternalTab] = useState<AdminPanelSubTab>('controls');
+  const currentTab: AdminPanelSubTab = activeSubTab ?? internalTab;
+  const setCurrentTab = (next: AdminPanelSubTab) => {
+    setInternalTab(next);
+    onSubTabChange?.(next);
+  };
+
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<MemberRole | null>(null);
+  const [visibleMemberLimit, setVisibleMemberLimit] = useState(50);
   const [showBroadcastDialog, setShowBroadcastDialog] = useState(false);
-
-  const filteredMembers = useMemo(
-    () =>
-      members.filter((m) => {
-        const matchesQuery =
-          !searchQuery.trim() ||
-          m.displayName.toLowerCase().includes(searchQuery.trim().toLowerCase());
-        const matchesRole = roleFilter === null || parseMemberRole(m.role) === roleFilter;
-        return matchesQuery && matchesRole;
-      }),
-    [members, searchQuery, roleFilter]
+  const [showDeleteGroupDialog, setShowDeleteGroupDialog] = useState(false);
+  const [deletingChannel, setDeletingChannel] = useState<ChatChannel | null>(null);
+  const [deletingMember, setDeletingMember] = useState<GroupMember | null>(null);
+  const [newChannelName, setNewChannelName] = useState('');
+  const [newChannelDesc, setNewChannelDesc] = useState('');
+  const [newChannelAccess, setNewChannelAccess] = useState<ChannelAccessLevel>(
+    ChannelAccessLevel.ALL
   );
+
+  const sensitiveAuditCount = useMemo(() => {
+    const logs = state.activityLogsState.status === 'success' ? state.activityLogsState.data : [];
+    const baseCount = logs.filter((entry) => isSensitiveAuditAction(entry.action)).length;
+    const hasRecordedGroupCreated = logs.some(
+      (entry) => parseActivityAction(entry.action) === ActivityAction.GROUP_CREATED
+    );
+    return baseCount + (group && group.createdAtMs > 0 && !hasRecordedGroupCreated ? 1 : 0);
+  }, [state.activityLogsState, group]);
+
+  const roleCounts = useMemo(() => {
+    const counts: Record<MemberRole, number> = {
+      [MemberRole.CREATOR]: 0,
+      [MemberRole.ADMIN]: 0,
+      [MemberRole.ORGANIZER]: 0,
+      [MemberRole.PARTICIPANT]: 0,
+    };
+    for (const m of members) {
+      counts[parseMemberRole(m.role)] += 1;
+    }
+    return counts;
+  }, [members]);
+
+  const filteredMembers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return members.filter((m) => {
+      const memberRole = parseMemberRole(m.role);
+      const roleLabel = ROLE_META[memberRole].label.toLowerCase();
+      const matchesQuery =
+        !q ||
+        m.displayName.toLowerCase().includes(q) ||
+        roleLabel.includes(q) ||
+        memberRole.toLowerCase().includes(q);
+      const matchesRole = roleFilter === null || memberRole === roleFilter;
+      return matchesQuery && matchesRole;
+    });
+  }, [members, searchQuery, roleFilter]);
+
+  const handleCreateQuickChannel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newChannelName.trim().length < 2) return;
+    const ok = await actions.createChannel(newChannelName, newChannelDesc, newChannelAccess);
+    if (ok) {
+      setNewChannelName('');
+      setNewChannelDesc('');
+    }
+  };
 
   return (
     <div className="mx-auto w-full max-w-[860px] space-y-4 px-4 py-5 sm:px-6">
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h1 className="font-display text-2xl font-bold">Admin Command Panel</h1>
-          <p className="text-xs text-[var(--rally-on-surface-variant)]">
+          <h1 className="font-display text-2xl font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
+            Admin Command Panel
+          </h1>
+          <p className="text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
             {isCreator
-              ? 'Group Creator: Full control over admins, group settings, and permissions.'
-              : 'Admin: Can edit group details & codes, create admins, and approve/delete posts. Only Creator can demote existing admins.'}
+              ? 'Group Creator: Full control over admins, group settings, backgrounds, and messaging channels.'
+              : 'Admin: Can edit group details & codes, customize backgrounds, manage messaging channels, create admins, and approve/delete posts.'}
           </p>
         </div>
         <RoleBadge role={state.currentRole} />
       </div>
 
+      {/* Admin Sub-Tab Switcher */}
+      <div
+        role="tablist"
+        aria-label="Admin Panel Sections"
+        className="flex gap-2 rounded-2xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-1.5"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={currentTab === 'controls'}
+          onClick={() => setCurrentTab('controls')}
+          data-testid="admin_tab_controls"
+          className={`flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold transition sm:text-sm ${
+            currentTab === 'controls'
+              ? 'bg-[var(--rally-primary)] text-white shadow-sm'
+              : 'text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]/60'
+          }`}
+        >
+          <SlidersHorizontal className="h-4 w-4 shrink-0" />
+          <span>Admin Controls</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={currentTab === 'audit'}
+          onClick={() => setCurrentTab('audit')}
+          data-testid="admin_tab_audit_log"
+          className={`flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold transition sm:text-sm ${
+            currentTab === 'audit'
+              ? 'bg-[var(--rally-primary)] text-white shadow-sm'
+              : 'text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]/60'
+          }`}
+        >
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          <span>Audit Log</span>
+          {sensitiveAuditCount > 0 && (
+            <span
+              data-testid="admin_tab_audit_count"
+              className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${
+                currentTab === 'audit'
+                  ? 'bg-white/20 text-white'
+                  : 'bg-[var(--rally-surface-variant)] text-[var(--rally-on-surface)]'
+              }`}
+            >
+              {sensitiveAuditCount}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {currentTab === 'audit' ? (
+        <AdminAuditLog
+          activityLogsState={state.activityLogsState}
+          activeGroup={group}
+          members={members}
+          currentUserId={state.currentUserId}
+          isBusy={state.isBusy}
+          onExportCsv={(opts) => void actions.exportAuditLogCsv(opts)}
+        />
+      ) : (
+        <>
       {/* Group Settings & Invite Code Card */}
       {group && (
         <GroupSettingsCard
           key={`${group.id}_${group.name}_${group.description}_${group.groupCode}`}
           group={group}
+          isCreator={isCreator}
+          groupImageUrl={group.groupImageUrl ?? state.groupImagesById[group.id] ?? null}
           isBusy={state.isBusy}
           onCopiedCode={onCopiedCode}
           onSaveDetails={(n, d) => void actions.updateGroupDetails(n, d)}
           onSaveCode={(c) => void actions.updateGroupCode(c)}
+          onSaveImage={(url) => void actions.updateGroupImage(group.id, url)}
         />
       )}
+
+      {/* Background & Appearance Customizer */}
+      {group && (
+        <BackgroundCustomizerCard
+          activeGroup={group}
+          joinedGroups={state.joinedGroups}
+          appBackground={state.appBackground}
+          groupBackgroundsById={state.groupBackgroundsById}
+          isBusy={state.isBusy}
+          onUpdateAppBackground={(spec) => void actions.updateAppBackground(spec)}
+          onUpdateGroupBackground={(gid, spec) => void actions.updateGroupBackground(gid, spec)}
+        />
+      )}
+
+      {/* Messaging Channels Manager (Create & Delete Messaging Groups) */}
+      <section
+        data-testid="admin_messaging_channels_card"
+        className="space-y-4 rounded-3xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="font-display text-lg font-bold">Messaging Channels</h2>
+            <p className="text-xs text-[var(--rally-on-surface-variant)]">
+              Create different role-scoped messaging groups and delete channels when finished.
+            </p>
+          </div>
+          <span className="rounded-lg bg-[var(--rally-surface-variant)] px-2.5 py-1 text-xs font-semibold text-[var(--rally-on-surface-variant)]">
+            {channels.length} {channels.length === 1 ? 'channel' : 'channels'}
+          </span>
+        </div>
+
+        <form
+          onSubmit={(e) => void handleCreateQuickChannel(e)}
+          className="grid gap-2.5 rounded-2xl border border-[var(--rally-outline)]/50 bg-[var(--rally-surface-variant)]/30 p-3.5 sm:grid-cols-12"
+        >
+          <input
+            type="text"
+            value={newChannelName}
+            onChange={(e) => setNewChannelName(e.target.value.slice(0, 60))}
+            placeholder="Channel name (e.g. logistics-team)"
+            data-testid="admin_new_channel_name_input"
+            className="rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-2 text-sm focus:border-[var(--rally-primary)] focus:outline-none sm:col-span-4"
+          />
+          <input
+            type="text"
+            value={newChannelDesc}
+            onChange={(e) => setNewChannelDesc(e.target.value.slice(0, 200))}
+            placeholder="Topic / purpose (optional)"
+            data-testid="admin_new_channel_desc_input"
+            className="rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-2 text-sm focus:border-[var(--rally-primary)] focus:outline-none sm:col-span-4"
+          />
+          <select
+            value={newChannelAccess}
+            onChange={(e) => setNewChannelAccess(e.target.value as ChannelAccessLevel)}
+            data-testid="admin_new_channel_access_select"
+            className="rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-2.5 py-2 text-xs font-semibold focus:border-[var(--rally-primary)] focus:outline-none sm:col-span-2"
+          >
+            <option value={ChannelAccessLevel.ALL}>All Members</option>
+            <option value={ChannelAccessLevel.ORGANIZER}>Organizers+</option>
+            <option value={ChannelAccessLevel.ADMIN}>Admins Only</option>
+          </select>
+          <button
+            type="submit"
+            disabled={state.isBusy || newChannelName.trim().length < 2}
+            data-testid="admin_create_channel_button"
+            className="inline-flex h-10 items-center justify-center gap-1 rounded-xl bg-[var(--rally-primary)] px-3 text-xs font-semibold text-white transition hover:brightness-110 disabled:opacity-45 sm:col-span-2"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Create</span>
+          </button>
+        </form>
+
+        {channels.length > 0 && (
+          <div className="divide-y divide-[var(--rally-outline)]/40 rounded-2xl border border-[var(--rally-outline)]/50">
+            {channels.map((ch) => {
+              const lvl = parseChannelAccessLevel(ch.accessLevel);
+              return (
+                <div
+                  key={ch.id}
+                  data-testid={`admin_channel_row_${ch.id}`}
+                  className="flex items-center justify-between gap-3 px-3.5 py-2.5"
+                >
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--rally-primary-container)] text-[var(--rally-on-primary-container)]">
+                      {lvl === ChannelAccessLevel.ALL ? (
+                        <MessageSquare className="h-4 w-4" />
+                      ) : (
+                        <Lock className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="truncate font-display text-sm font-bold">#{ch.name}</span>
+                        <span className="rounded bg-[var(--rally-surface-variant)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--rally-on-surface-variant)]">
+                          {CHANNEL_ACCESS_LABELS[lvl]}
+                        </span>
+                      </div>
+                      <div className="truncate text-xs text-[var(--rally-on-surface-variant)]">
+                        {ch.messageCount} messages{ch.description ? ` • ${ch.description}` : ''}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={state.isBusy}
+                    onClick={() => setDeletingChannel(ch)}
+                    data-testid={`admin_delete_channel_${ch.id}`}
+                    title="Delete channel after usage"
+                    className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--rally-error)]/35 px-2.5 py-1.5 text-xs font-semibold text-[var(--rally-error)] transition hover:bg-[var(--rally-error)]/10 disabled:opacity-45"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Delete</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       {/* Broadcast Quick Action */}
       <button
@@ -129,26 +393,150 @@ export function AdminPanelScreen({
         </div>
       </div>
 
+      {/* Record-Keeping Exports (CSV) */}
+      {group && (
+        <section
+          data-testid="admin_csv_export_card"
+          className="space-y-3 rounded-3xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-5"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="flex items-start gap-2.5">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--rally-primary-container)] text-[var(--rally-on-primary-container)]">
+                <FileSpreadsheet className="h-4 w-4" />
+              </div>
+              <div>
+                <h2 className="font-display text-lg font-bold">Record-Keeping Exports (CSV)</h2>
+                <p className="text-xs text-[var(--rally-on-surface-variant)]">
+                  Download spreadsheet-ready CSV files of the administrative audit trail and group
+                  membership roster.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-2.5 sm:grid-cols-3">
+            <button
+              type="button"
+              disabled={state.isBusy || state.activityLogsState.status === 'loading'}
+              onClick={() =>
+                void actions.exportAuditLogCsv({ scope: 'SENSITIVE', sortOrder: 'desc' })
+              }
+              data-testid="admin_export_audit_csv_button"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl border border-[var(--rally-outline)] bg-[var(--rally-surface-variant)]/40 px-3.5 py-2.5 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
+            >
+              <Download className="h-4 w-4 text-[var(--rally-primary)]" />
+              <span>Audit Log CSV ({sensitiveAuditCount})</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={state.isBusy || state.membersState.status === 'loading'}
+              onClick={() => actions.exportMembersCsv(members)}
+              data-testid="admin_export_members_csv_button"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl border border-[var(--rally-outline)] bg-[var(--rally-surface-variant)]/40 px-3.5 py-2.5 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
+            >
+              <Download className="h-4 w-4 text-[var(--rally-primary)]" />
+              <span>Membership CSV ({members.length})</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={
+                state.isBusy ||
+                state.membersState.status === 'loading' ||
+                state.activityLogsState.status === 'loading'
+              }
+              onClick={() => void actions.exportCombinedRecordsCsv()}
+              data-testid="admin_export_combined_csv_button"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-[var(--rally-primary)] px-3.5 py-2.5 text-xs font-semibold text-white transition hover:brightness-110 disabled:opacity-45"
+            >
+              <Download className="h-4 w-4" />
+              <span>Combined Archive CSV</span>
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Group Activity Log */}
+      <ActivityLog
+        activityLogsState={state.activityLogsState}
+        currentUserId={state.currentUserId}
+      />
+
       {/* Member Permissions */}
       <div className="space-y-3 pt-1">
-        <h2 className="font-display text-lg font-bold">Member Permissions ({members.length})</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-display text-lg font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
+            Member Permissions ({members.length} / 500)
+          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            {(searchQuery.trim() || roleFilter !== null) && (
+              <span
+                data-testid="member_filter_match_count"
+                className="text-xs font-semibold text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]"
+              >
+                Showing {filteredMembers.length} of {members.length}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={state.isBusy || members.length === 0}
+              onClick={() =>
+                actions.exportMembersCsv(
+                  searchQuery.trim() || roleFilter !== null ? filteredMembers : members
+                )
+              }
+              data-testid="member_roster_export_csv_button"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
+            >
+              <Download className="h-3.5 w-3.5 text-[var(--rally-primary)]" />
+              <span>
+                {searchQuery.trim() || roleFilter !== null
+                  ? `Export Filtered (${filteredMembers.length})`
+                  : 'Export CSV'}
+              </span>
+            </button>
+          </div>
+        </div>
 
         <div className="relative">
           <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--rally-on-surface-variant)]" />
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search participants, organizers, admins..."
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setVisibleMemberLimit(50);
+            }}
+            placeholder="Search members by name or role (e.g. Organizer, Admin)..."
+            aria-label="Filter group members by name or role"
             data-testid="member_search_input"
-            className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-2.5 pl-10 pr-4 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+            className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-2.5 pl-10 pr-10 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
           />
+          {searchQuery.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery('');
+                setVisibleMemberLimit(50);
+              }}
+              aria-label="Clear member search"
+              data-testid="member_search_clear_button"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-1 text-[var(--rally-on-surface-variant)] transition hover:bg-[var(--rally-surface-variant)] hover:text-[var(--rally-on-surface)]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => setRoleFilter(null)}
+            onClick={() => {
+              setRoleFilter(null);
+              setVisibleMemberLimit(50);
+            }}
+            data-testid="member_role_filter_all"
             className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
               roleFilter === null
                 ? 'border-[var(--rally-primary)] bg-[var(--rally-primary-container)] text-[var(--rally-on-primary-container)]'
@@ -163,30 +551,72 @@ export function AdminPanelScreen({
               <button
                 key={role}
                 type="button"
-                onClick={() => setRoleFilter(active ? null : role)}
+                onClick={() => {
+                  setRoleFilter(active ? null : role);
+                  setVisibleMemberLimit(50);
+                }}
+                data-testid={`member_role_filter_${role.toLowerCase()}`}
                 className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
                   active
                     ? 'border-[var(--rally-primary)] bg-[var(--rally-primary-container)] text-[var(--rally-on-primary-container)]'
                     : 'border-[var(--rally-outline)] bg-[var(--rally-surface)] text-[var(--rally-on-surface-variant)]'
                 }`}
               >
-                {ROLE_META[role].label}
+                {ROLE_META[role].label} ({roleCounts[role]})
               </button>
             );
           })}
         </div>
 
-        <div className="space-y-2">
-          {filteredMembers.map((member) => (
-            <MemberPermissionRow
-              key={member.uid}
-              member={member}
-              viewerIsCreator={isCreator}
-              viewerUid={state.currentUserId}
-              onAssignRole={(newRole) => void actions.updateMemberRole(member.uid, newRole)}
-            />
-          ))}
-        </div>
+        {filteredMembers.length === 0 ? (
+          <div
+            data-testid="member_search_empty_state"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-4 text-sm text-[var(--rally-on-surface-variant)]"
+          >
+            <span>No members match your current name or role filter.</span>
+            {(searchQuery.trim() || roleFilter !== null) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setRoleFilter(null);
+                  setVisibleMemberLimit(50);
+                }}
+                data-testid="member_search_reset_filters_button"
+                className="rounded-xl border border-[var(--rally-outline)] px-3 py-1.5 text-xs font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/40"
+              >
+                Reset Filters
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {filteredMembers.slice(0, visibleMemberLimit).map((member) => (
+              <MemberPermissionRow
+                key={member.uid}
+                member={member}
+                viewerIsCreator={isCreator}
+                viewerUid={state.currentUserId}
+                isBusy={state.isBusy}
+                onAssignRole={(newRole) => void actions.updateMemberRole(member.uid, newRole)}
+                onRemoveMember={() => setDeletingMember(member)}
+              />
+            ))}
+          </div>
+        )}
+
+        {filteredMembers.length > visibleMemberLimit && (
+          <div className="flex justify-center pt-1">
+            <button
+              type="button"
+              onClick={() => setVisibleMemberLimit((limit) => limit + 50)}
+              data-testid="admin_show_more_members_button"
+              className="rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-4 py-2 text-xs font-semibold text-[var(--rally-primary)] transition hover:bg-[var(--rally-primary-container)]/40"
+            >
+              Show 50 more ({filteredMembers.length - visibleMemberLimit} remaining)
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Broadcast Composer Dialog */}
@@ -196,12 +626,98 @@ export function AdminPanelScreen({
         initialNotification={null}
         channels={channels}
         events={events}
+        isBusy={state.isBusy}
         onClose={() => setShowBroadcastDialog(false)}
         onSend={(params) => {
           void actions.sendNotification(params);
           setShowBroadcastDialog(false);
         }}
+        onSendAndAnother={(params) => actions.sendNotification(params)}
       />
+
+      {/* Delete Group (Creator Only) */}
+      {group && isCreator && (
+        <div className="space-y-3 rounded-3xl border border-[var(--rally-error)]/35 bg-[var(--rally-surface)] p-5">
+          <div>
+            <h2 className="font-display text-lg font-bold text-[var(--rally-error)]">
+              Delete Group
+            </h2>
+            <p className="text-xs text-[var(--rally-on-surface-variant)]">
+              When this event community is finished, permanently delete the group and retire its
+              invite code ({group.groupCode}).
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={state.isBusy}
+            onClick={() => setShowDeleteGroupDialog(true)}
+            data-testid="admin_delete_group_button"
+            className="inline-flex h-10 items-center gap-2 rounded-xl border border-[var(--rally-error)]/45 px-4 text-xs font-semibold text-[var(--rally-error)] transition hover:bg-[var(--rally-error)]/10 disabled:opacity-45"
+          >
+            <Trash2 className="h-4 w-4" />
+            <span>Delete This Group</span>
+          </button>
+        </div>
+      )}
+
+      <ConfirmDeleteDialog
+        open={showDeleteGroupDialog && group !== null}
+        title="Delete Group?"
+        description={
+          group
+            ? `Permanently delete "${group.name}" and retire invite code ${group.groupCode}? This cannot be undone.`
+            : ''
+        }
+        confirmLabel="Delete Group"
+        isBusy={state.isBusy}
+        onCancel={() => setShowDeleteGroupDialog(false)}
+        onConfirm={() => {
+          if (group) {
+            void actions.deleteGroup(group.id, group.groupCode);
+          }
+          setShowDeleteGroupDialog(false);
+        }}
+      />
+
+      <ConfirmDeleteDialog
+        open={deletingChannel !== null}
+        title="Delete Messaging Channel?"
+        description={
+          deletingChannel
+            ? `Permanently delete #${deletingChannel.name} and its ${deletingChannel.messageCount} message(s)? This cannot be undone.`
+            : ''
+        }
+        confirmLabel="Delete Channel"
+        isBusy={state.isBusy}
+        onCancel={() => setDeletingChannel(null)}
+        onConfirm={() => {
+          if (deletingChannel) {
+            void actions.deleteChannel(deletingChannel.id);
+          }
+          setDeletingChannel(null);
+        }}
+      />
+
+      <ConfirmDeleteDialog
+        open={deletingMember !== null}
+        title="Remove Group Member?"
+        description={
+          deletingMember
+            ? `Remove ${deletingMember.displayName} (${ROLE_META[parseMemberRole(deletingMember.role)].label}) from ${group?.name ?? 'this group'}? They will lose access immediately and this removal will be recorded in the Audit Log.`
+            : ''
+        }
+        confirmLabel="Remove Member"
+        isBusy={state.isBusy}
+        onCancel={() => setDeletingMember(null)}
+        onConfirm={() => {
+          if (deletingMember) {
+            void actions.removeMember(deletingMember.uid);
+          }
+          setDeletingMember(null);
+        }}
+      />
+        </>
+      )}
     </div>
   );
 }
@@ -210,12 +726,16 @@ function MemberPermissionRow({
   member,
   viewerIsCreator,
   viewerUid,
+  isBusy,
   onAssignRole,
+  onRemoveMember,
 }: {
   member: GroupMember;
   viewerIsCreator: boolean;
   viewerUid: string;
+  isBusy: boolean;
   onAssignRole: (role: MemberRole) => void;
+  onRemoveMember: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const memberRole = parseMemberRole(member.role);
@@ -239,21 +759,36 @@ function MemberPermissionRow({
         </div>
       </div>
 
-      <div className="relative shrink-0">
+      <div className="relative flex shrink-0 items-center gap-1.5">
         {canEdit ? (
           <>
             <button
               type="button"
+              disabled={isBusy}
               onClick={() => setMenuOpen((o) => !o)}
               data-testid={`manage_role_${member.uid}`}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--rally-surface-variant)]"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
             >
               <UserCog className="h-4 w-4" />
               <span>Role</span>
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
+            <button
+              type="button"
+              disabled={isBusy}
+              onClick={() => {
+                setMenuOpen(false);
+                onRemoveMember();
+              }}
+              data-testid={`remove_member_${member.uid}`}
+              title={`Remove ${member.displayName} from group`}
+              className="inline-flex items-center gap-1 rounded-xl border border-[var(--rally-error)]/35 px-2.5 py-1.5 text-xs font-semibold text-[var(--rally-error)] transition hover:bg-[var(--rally-error)]/10 disabled:opacity-45"
+            >
+              <UserMinus className="h-3.5 w-3.5" />
+              <span>Remove</span>
+            </button>
             {menuOpen && (
-              <div className="absolute right-0 z-20 mt-1 w-48 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-1 shadow-lg">
+              <div className="absolute right-0 top-full z-20 mt-1 w-48 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-1 shadow-lg">
                 {[MemberRole.PARTICIPANT, MemberRole.ORGANIZER, MemberRole.ADMIN].map(
                   (targetRole) => (
                     <button
@@ -288,16 +823,22 @@ function MemberPermissionRow({
 
 function GroupSettingsCard({
   group,
+  isCreator,
+  groupImageUrl,
   isBusy,
   onCopiedCode,
   onSaveDetails,
   onSaveCode,
+  onSaveImage,
 }: {
   group: RallyGroup;
+  isCreator: boolean;
+  groupImageUrl: string | null;
   isBusy: boolean;
   onCopiedCode: () => void;
   onSaveDetails: (name: string, description: string) => void;
   onSaveCode: (code: string) => void;
+  onSaveImage: (imageUrl: string | null) => void;
 }) {
   const [nameInput, setNameInput] = useState(group.name);
   const [descriptionInput, setDescriptionInput] = useState(group.description);
@@ -320,6 +861,41 @@ function GroupSettingsCard({
           </p>
         </div>
         <GroupCodePill code={group.groupCode} onCopied={onCopiedCode} />
+      </div>
+
+      {/* Group Profile Image */}
+      <div className="rounded-2xl border border-[var(--rally-outline)]/50 bg-[var(--rally-surface-variant)]/25 p-3.5">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-[var(--rally-on-surface-variant)]">
+            Group Profile Image
+          </span>
+          {!isCreator && (
+            <span className="text-[11px] font-medium text-[var(--rally-on-surface-variant)]">
+              Creator-only setting
+            </span>
+          )}
+        </div>
+        {isCreator ? (
+          <GroupImageEditor
+            groupName={group.name}
+            imageUrl={groupImageUrl}
+            isBusy={isBusy}
+            onChangeImage={onSaveImage}
+            testIdPrefix="admin_group_image"
+          />
+        ) : (
+          <div className="flex items-center gap-3">
+            <GroupAvatar
+              groupName={group.name}
+              imageUrl={groupImageUrl}
+              size="lg"
+              testId="admin_group_image_readonly"
+            />
+            <p className="text-xs text-[var(--rally-on-surface-variant)]">
+              Only the Group Creator can upload or change the group&apos;s hub profile image.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="space-y-3">

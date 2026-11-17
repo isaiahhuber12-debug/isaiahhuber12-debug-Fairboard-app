@@ -40,6 +40,19 @@ export function countdownLabel(targetEpochMs: number): string {
   return `in ${minutes}m`;
 }
 
+export function formatRelativeTime(epochMs: number, nowMs: number): string {
+  const diffMs = Math.max(0, nowMs - epochMs);
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 45) return 'Just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return formatDateTime(epochMs);
+}
+
 export function toDateInputValue(epochMs: number): string {
   const d = new Date(epochMs);
   const yyyy = d.getFullYear();

@@ -154,12 +154,69 @@ export function parseMessageType(raw?: string | null): MessageType {
   return MessageType.TEXT;
 }
 
+export enum ActivityCategory {
+  TASK = 'TASK',
+  CALENDAR = 'CALENDAR',
+  MEMBER = 'MEMBER',
+  CHANNEL = 'CHANNEL',
+  ALERT = 'ALERT',
+  GROUP = 'GROUP',
+}
+
+export const ACTIVITY_CATEGORY_LABELS: Record<ActivityCategory, string> = {
+  [ActivityCategory.TASK]: 'Tasks',
+  [ActivityCategory.CALENDAR]: 'Calendar',
+  [ActivityCategory.MEMBER]: 'Members',
+  [ActivityCategory.CHANNEL]: 'Chats',
+  [ActivityCategory.ALERT]: 'Alerts',
+  [ActivityCategory.GROUP]: 'Group',
+};
+
+export function parseActivityCategory(raw?: string | null): ActivityCategory {
+  if (!raw) return ActivityCategory.TASK;
+  const upper = raw.toUpperCase();
+  if (upper in ActivityCategory) return upper as ActivityCategory;
+  return ActivityCategory.TASK;
+}
+
+export enum ActivityAction {
+  TASK_CREATED = 'TASK_CREATED',
+  TASK_UPDATED = 'TASK_UPDATED',
+  TASK_COMPLETED = 'TASK_COMPLETED',
+  TASK_DELETED = 'TASK_DELETED',
+  TASK_CLAIMED = 'TASK_CLAIMED',
+  TASK_RELEASED = 'TASK_RELEASED',
+  EVENT_CREATED = 'EVENT_CREATED',
+  EVENT_UPDATED = 'EVENT_UPDATED',
+  EVENT_DELETED = 'EVENT_DELETED',
+  MEMBER_JOINED = 'MEMBER_JOINED',
+  MEMBER_ROLE_CHANGED = 'MEMBER_ROLE_CHANGED',
+  MEMBER_DELETED = 'MEMBER_DELETED',
+  CHANNEL_CREATED = 'CHANNEL_CREATED',
+  CHANNEL_UPDATED = 'CHANNEL_UPDATED',
+  CHANNEL_DELETED = 'CHANNEL_DELETED',
+  ALERT_SENT = 'ALERT_SENT',
+  ALERT_APPROVED = 'ALERT_APPROVED',
+  ALERT_DELETED = 'ALERT_DELETED',
+  GROUP_CREATED = 'GROUP_CREATED',
+  GROUP_UPDATED = 'GROUP_UPDATED',
+}
+
+export function parseActivityAction(raw?: string | null): ActivityAction {
+  if (!raw) return ActivityAction.TASK_UPDATED;
+  const upper = raw.toUpperCase();
+  if (upper in ActivityAction) return upper as ActivityAction;
+  return ActivityAction.TASK_UPDATED;
+}
+
 export interface JoinedGroupRef {
   id: string;
   groupId: string;
   groupName: string;
   groupCode: string;
   role: string;
+  groupBackground?: string | null;
+  groupImageUrl?: string | null;
   joinedAtMs: number;
   updatedAtMs: number;
 }
@@ -170,6 +227,8 @@ export interface RallyGroup {
   description: string;
   groupCode: string;
   ownerId: string;
+  groupBackground?: string | null;
+  groupImageUrl?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
 }
@@ -259,6 +318,33 @@ export interface HubNotification {
   createdAtMs: number;
   updatedAtMs?: number | null;
 }
+
+export interface GroupActivityLog {
+  id: string;
+  actorId: string;
+  actorName: string;
+  actorRole: string;
+  category: string;
+  action: string;
+  summary: string;
+  details?: string | null;
+  targetId?: string | null;
+  createdAtMs: number;
+}
+
+export interface SmsPreferences {
+  phone: string;
+  enabled: boolean;
+  forMessages: boolean;
+  forEvents: boolean;
+}
+
+export const DEFAULT_SMS_PREFERENCES: SmsPreferences = {
+  phone: '',
+  enabled: false,
+  forMessages: true,
+  forEvents: true,
+};
 
 export interface EngagementAnalytics {
   totalMembers: number;

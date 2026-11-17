@@ -7,6 +7,7 @@ import {
   UserPlus,
   Zap,
 } from 'lucide-react';
+import { OfflineStatusBadge } from '../RallyComponents';
 
 interface AuthAndJoinScreenProps {
   onJoinWithCodeWithGoogle: (code: string, displayName: string) => Promise<void>;
@@ -68,18 +69,21 @@ export function AuthAndJoinScreen({
             background: 'linear-gradient(135deg, #1B4DFF 0%, #1034B8 100%)',
           }}
         >
-          <div className="flex items-center gap-3.5">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FF5A36] shadow-sm">
-              <Zap className="h-6 w-6 text-white" />
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3.5">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FF5A36] shadow-sm">
+                <Zap className="h-6 w-6 text-white" />
+              </div>
+              <div>
+                <h1 className="font-display text-2xl font-bold tracking-tight sm:text-3xl">
+                  RallyHub
+                </h1>
+                <p className="text-xs font-medium text-white/85 sm:text-sm">
+                  Live Events • Tasks • Group Chats
+                </p>
+              </div>
             </div>
-            <div>
-              <h1 className="font-display text-2xl font-bold tracking-tight sm:text-3xl">
-                RallyHub
-              </h1>
-              <p className="text-xs font-medium text-white/85 sm:text-sm">
-                Live Events • Tasks • Group Chats
-              </p>
-            </div>
+            <OfflineStatusBadge />
           </div>
 
           <div className="mt-5 flex flex-wrap gap-2">

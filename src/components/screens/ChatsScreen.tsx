@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Copy,
   Lock,
   MessageSquare,
   Pencil,
   Plus,
   Send,
+  Smartphone,
   Trash2,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
@@ -21,7 +23,7 @@ import {
   parseMessageType,
   ROLE_META,
 } from '../../types/rally';
-import { ModalDialog, RoleBadge } from '../RallyComponents';
+import { ConfirmDeleteDialog, ModalDialog, RoleBadge } from '../RallyComponents';
 
 interface ChatsScreenProps {
   state: RallyWorkspaceState;
@@ -33,10 +35,13 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
   const activeChannel = channels.find((c) => c.id === state.selectedChannelId) ?? null;
 
   const [showCreateChannelDialog, setShowCreateChannelDialog] = useState(false);
+  const [duplicatingChannel, setDuplicatingChannel] = useState<ChatChannel | null>(null);
   const [editingChannel, setEditingChannel] = useState<ChatChannel | null>(null);
+  const [deletingChannel, setDeletingChannel] = useState<ChatChannel | null>(null);
 
   const canManageChannels = ROLE_META[state.currentRole].canManageEventsAndTasks;
   const isAdminOrCreator = ROLE_META[state.currentRole].canAccessAdminPanel;
+  const smsMessagesActive = state.smsPreferences.enabled && state.smsPreferences.forMessages;
 
   return (
     <div className="mx-auto w-full max-w-[860px] px-4 py-5 sm:px-6">
@@ -46,9 +51,12 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
           messages={state.messagesState.status === 'success' ? state.messagesState.data : []}
           currentUid={state.currentUserId}
           canManageChannel={canManageChannels}
+          canDeleteChannel={isAdminOrCreator}
           canDeleteMessages={isAdminOrCreator}
+          smsMessagesActive={smsMessagesActive}
           onBack={() => actions.selectChannel(null)}
           onEditChannel={() => setEditingChannel(activeChannel)}
+          onDeleteChannel={() => setDeletingChannel(activeChannel)}
           onSendMessage={(text) => void actions.sendMessage(activeChannel.id, text)}
           onEditMessage={(msgId, newText) =>
             void actions.editMessage(activeChannel.id, msgId, newText)
@@ -59,24 +67,39 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h1 className="font-display text-2xl font-bold">Group Channels</h1>
-              <p className="text-xs text-[var(--rally-on-surface-variant)]">
-                {canManageChannels
-                  ? 'Role-scoped chats for hundreds of participants and teams.'
-                  : 'Message teams in channels you belong to.'}
+              <h1 className="font-display text-2xl font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
+                Group Channels
+              </h1>
+              <p className="text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
+                {isAdminOrCreator
+                  ? 'Create, customize, and delete different messaging groups after use.'
+                  : canManageChannels
+                    ? 'Role-scoped messaging channels for participants and teams.'
+                    : 'Message teams in channels you belong to.'}
               </p>
             </div>
-            {canManageChannels && (
-              <button
-                type="button"
-                onClick={() => setShowCreateChannelDialog(true)}
-                data-testid="create_channel_fab"
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-primary)] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:brightness-110"
-              >
-                <Plus className="h-4 w-4" />
-                <span>New Channel</span>
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {smsMessagesActive && (
+                <span
+                  data-testid="chats_sms_active_badge"
+                  className="inline-flex items-center gap-1 rounded-xl bg-[var(--rally-tertiary-container)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--rally-on-tertiary-container)]"
+                >
+                  <Smartphone className="h-3.5 w-3.5" />
+                  <span>SMS Push On</span>
+                </span>
+              )}
+              {canManageChannels && (
+                <button
+                  type="button"
+                  onClick={() => setShowCreateChannelDialog(true)}
+                  data-testid="create_channel_fab"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-primary)] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:brightness-110"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>New Channel</span>
+                </button>
+              )}
+            </div>
           </div>
 
           {channels.length === 0 ? (
@@ -121,18 +144,47 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
                       {channel.messageCount}
                     </span>
                     {canManageChannels && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingChannel(channel);
-                        }}
-                        data-testid={`edit_channel_${channel.id}`}
-                        title="Edit channel"
-                        className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDuplicatingChannel(channel);
+                            setShowCreateChannelDialog(true);
+                          }}
+                          data-testid={`duplicate_channel_${channel.id}`}
+                          title="Duplicate channel"
+                          className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        >
+                          <Copy className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingChannel(channel);
+                          }}
+                          data-testid={`edit_channel_${channel.id}`}
+                          title="Edit channel"
+                          className="rounded-lg p-1.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                        {isAdminOrCreator && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeletingChannel(channel);
+                            }}
+                            data-testid={`delete_channel_${channel.id}`}
+                            title="Delete channel after usage"
+                            className="rounded-lg p-1.5 text-[var(--rally-error)] hover:bg-[var(--rally-error)]/10"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
@@ -146,12 +198,19 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
       <ChannelEditorDialog
         open={showCreateChannelDialog}
         initialChannel={null}
+        prefillChannel={duplicatingChannel}
         canUseAdminLevel={isAdminOrCreator}
-        onClose={() => setShowCreateChannelDialog(false)}
+        isBusy={state.isBusy}
+        onClose={() => {
+          setShowCreateChannelDialog(false);
+          setDuplicatingChannel(null);
+        }}
         onSave={(name, desc, level) => {
           void actions.createChannel(name, desc, level);
           setShowCreateChannelDialog(false);
+          setDuplicatingChannel(null);
         }}
+        onSaveAndAnother={(name, desc, level) => actions.createChannel(name, desc, level)}
       />
 
       {/* Edit Channel Dialog */}
@@ -159,12 +218,33 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
         open={editingChannel !== null}
         initialChannel={editingChannel}
         canUseAdminLevel={isAdminOrCreator}
+        isBusy={state.isBusy}
         onClose={() => setEditingChannel(null)}
         onSave={(name, desc, level) => {
           if (editingChannel) {
             void actions.updateChannel(editingChannel.id, name, desc, level);
           }
           setEditingChannel(null);
+        }}
+      />
+
+      {/* Delete Channel Confirmation Dialog */}
+      <ConfirmDeleteDialog
+        open={deletingChannel !== null}
+        title="Delete Messaging Channel?"
+        description={
+          deletingChannel
+            ? `Permanently delete #${deletingChannel.name} and its ${deletingChannel.messageCount} message(s)? This cannot be undone.`
+            : ''
+        }
+        confirmLabel="Delete Channel"
+        isBusy={state.isBusy}
+        onCancel={() => setDeletingChannel(null)}
+        onConfirm={() => {
+          if (deletingChannel) {
+            void actions.deleteChannel(deletingChannel.id);
+          }
+          setDeletingChannel(null);
         }}
       />
     </div>
@@ -176,9 +256,12 @@ function ChatThreadView({
   messages,
   currentUid,
   canManageChannel,
+  canDeleteChannel,
   canDeleteMessages,
+  smsMessagesActive,
   onBack,
   onEditChannel,
+  onDeleteChannel,
   onSendMessage,
   onEditMessage,
   onDeleteMessage,
@@ -187,9 +270,12 @@ function ChatThreadView({
   messages: ChatMessage[];
   currentUid: string;
   canManageChannel: boolean;
+  canDeleteChannel: boolean;
   canDeleteMessages: boolean;
+  smsMessagesActive: boolean;
   onBack: () => void;
   onEditChannel: () => void;
+  onDeleteChannel: () => void;
   onSendMessage: (text: string) => void;
   onEditMessage: (messageId: string, newText: string) => void;
   onDeleteMessage: (messageId: string) => void;
@@ -226,24 +312,45 @@ function ChatThreadView({
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div className="min-w-0">
-            <div className="truncate font-display text-base font-bold">#{channel.name}</div>
+            <div className="flex items-center gap-2">
+              <span className="truncate font-display text-base font-bold">#{channel.name}</span>
+              {smsMessagesActive && (
+                <span className="hidden items-center gap-1 rounded-md bg-[var(--rally-tertiary-container)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--rally-on-tertiary-container)] sm:inline-flex">
+                  <Smartphone className="h-3 w-3" />
+                  SMS
+                </span>
+              )}
+            </div>
             <div className="truncate text-xs text-[var(--rally-on-surface-variant)]">
               {CHANNEL_ACCESS_LABELS[parseChannelAccessLevel(channel.accessLevel)]} •{' '}
               {channel.description}
             </div>
           </div>
         </div>
-        {canManageChannel && (
-          <button
-            type="button"
-            onClick={onEditChannel}
-            data-testid="edit_active_channel_button"
-            title="Edit channel details"
-            className="rounded-xl p-2 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
-          >
-            <Pencil className="h-4 w-4" />
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-1">
+          {canManageChannel && (
+            <button
+              type="button"
+              onClick={onEditChannel}
+              data-testid="edit_active_channel_button"
+              title="Edit channel details"
+              className="rounded-xl p-2 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+          )}
+          {canDeleteChannel && (
+            <button
+              type="button"
+              onClick={onDeleteChannel}
+              data-testid="delete_active_channel_button"
+              title="Delete channel after usage"
+              className="rounded-xl p-2 text-[var(--rally-error)] hover:bg-[var(--rally-error)]/10"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Messages Stream */}
@@ -463,48 +570,93 @@ function MessageActions({
 function ChannelEditorDialog({
   open,
   initialChannel,
+  prefillChannel = null,
   canUseAdminLevel,
+  isBusy = false,
   onClose,
   onSave,
+  onSaveAndAnother,
 }: {
   open: boolean;
   initialChannel: ChatChannel | null;
+  prefillChannel?: ChatChannel | null;
   canUseAdminLevel: boolean;
+  isBusy?: boolean;
   onClose: () => void;
   onSave: (name: string, description: string, accessLevel: ChannelAccessLevel) => void;
+  onSaveAndAnother?: (
+    name: string,
+    description: string,
+    accessLevel: ChannelAccessLevel
+  ) => Promise<boolean>;
 }) {
   if (!open) return null;
   return (
     <ChannelEditorDialogBody
-      key={initialChannel?.id ?? 'new_channel'}
+      key={initialChannel?.id ?? (prefillChannel ? `dup_${prefillChannel.id}` : 'new_channel')}
       initialChannel={initialChannel}
+      prefillChannel={prefillChannel}
       canUseAdminLevel={canUseAdminLevel}
+      isBusy={isBusy}
       onClose={onClose}
       onSave={onSave}
+      onSaveAndAnother={onSaveAndAnother}
     />
   );
 }
 
 function ChannelEditorDialogBody({
   initialChannel,
+  prefillChannel = null,
   canUseAdminLevel,
+  isBusy = false,
   onClose,
   onSave,
+  onSaveAndAnother,
 }: {
   initialChannel: ChatChannel | null;
+  prefillChannel?: ChatChannel | null;
   canUseAdminLevel: boolean;
+  isBusy?: boolean;
   onClose: () => void;
   onSave: (name: string, description: string, accessLevel: ChannelAccessLevel) => void;
+  onSaveAndAnother?: (
+    name: string,
+    description: string,
+    accessLevel: ChannelAccessLevel
+  ) => Promise<boolean>;
 }) {
-  const [name, setName] = useState(() => initialChannel?.name ?? '');
-  const [description, setDescription] = useState(() => initialChannel?.description ?? '');
-  const [accessLevel, setAccessLevel] = useState<ChannelAccessLevel>(() =>
-    initialChannel ? parseChannelAccessLevel(initialChannel.accessLevel) : ChannelAccessLevel.ALL
+  const seed = initialChannel ?? prefillChannel;
+  const [name, setName] = useState(() =>
+    initialChannel
+      ? initialChannel.name
+      : prefillChannel
+        ? `${prefillChannel.name} Copy`.slice(0, 60)
+        : ''
   );
+  const [description, setDescription] = useState(() => seed?.description ?? '');
+  const [accessLevel, setAccessLevel] = useState<ChannelAccessLevel>(() =>
+    seed ? parseChannelAccessLevel(seed.accessLevel) : ChannelAccessLevel.ALL
+  );
+  const [addedCount, setAddedCount] = useState(0);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
 
   const availableLevels = canUseAdminLevel
     ? [ChannelAccessLevel.ALL, ChannelAccessLevel.ORGANIZER, ChannelAccessLevel.ADMIN]
     : [ChannelAccessLevel.ALL, ChannelAccessLevel.ORGANIZER];
+
+  const canSubmit = !isBusy && name.trim().length >= 2;
+
+  const handleCreateAnother = async () => {
+    if (!canSubmit || !onSaveAndAnother) return;
+    const ok = await onSaveAndAnother(name, description, accessLevel);
+    if (ok) {
+      setName('');
+      setDescription('');
+      setAddedCount((c) => c + 1);
+      window.setTimeout(() => nameInputRef.current?.focus(), 20);
+    }
+  };
 
   return (
     <ModalDialog
@@ -512,31 +664,49 @@ function ChannelEditorDialogBody({
       onClose={onClose}
       title={initialChannel ? 'Edit Group Chat' : 'Create Group Chat'}
       footer={
-        <>
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
             className="rounded-xl px-3.5 py-2 text-sm font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
           >
-            Cancel
+            {addedCount > 0 && !initialChannel ? 'Done' : 'Cancel'}
           </button>
+          {!initialChannel && onSaveAndAnother && (
+            <button
+              type="button"
+              disabled={!canSubmit}
+              onClick={() => void handleCreateAnother()}
+              data-testid="confirm_create_another_channel_button"
+              className="rounded-xl border border-[var(--rally-primary)] px-3.5 py-2 text-sm font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50 disabled:opacity-45"
+            >
+              Create &amp; Add Another
+            </button>
+          )}
           <button
             type="button"
-            disabled={name.trim().length < 2}
+            disabled={!canSubmit}
             onClick={() => onSave(name, description, accessLevel)}
             data-testid="confirm_create_channel_button"
             className="rounded-xl bg-[var(--rally-primary)] px-4 py-2 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-45"
           >
             {initialChannel ? 'Save Changes' : 'Create Channel'}
           </button>
-        </>
+        </div>
       }
     >
+      {addedCount > 0 && !initialChannel && (
+        <div className="rounded-xl bg-[var(--rally-tertiary-container)] px-3.5 py-2 text-xs font-semibold text-[var(--rally-on-tertiary-container)]">
+          Created {addedCount} channel{addedCount === 1 ? '' : 's'} — add another channel below.
+        </div>
+      )}
+
       <div className="space-y-1">
         <label className="block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
           Channel Name
         </label>
         <input
+          ref={nameInputRef}
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value.slice(0, 60))}

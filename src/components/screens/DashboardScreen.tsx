@@ -16,10 +16,12 @@ import {
   Users,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
+import { getGroupBackgroundPresentation } from '../../lib/backgrounds';
 import {
   countdownLabel,
   formatDateTime,
 } from '../../lib/dateFormat';
+import { isReminderAt30mSet } from '../../lib/notifications';
 import {
   ApprovalStatus,
   type EventTask,
@@ -34,12 +36,14 @@ import {
   ROLE_META,
 } from '../../types/rally';
 import {
+  GroupAvatar,
   GroupCodePill,
   MetricStatTile,
   ModalDialog,
   ReminderEditorDialog,
   RoleBadge,
 } from '../RallyComponents';
+import { ActivityLog } from '../ActivityLog';
 
 interface DashboardScreenProps {
   state: RallyWorkspaceState;
@@ -47,6 +51,7 @@ interface DashboardScreenProps {
   onOpenEvent: (eventId: string) => void;
   onOpenNotifications: () => void;
   onOpenAiCoordinator: () => void;
+  onOpenAdminPanel?: () => void;
   onCopiedCode: () => void;
 }
 
@@ -56,10 +61,14 @@ export function DashboardScreen({
   onOpenEvent,
   onOpenNotifications,
   onOpenAiCoordinator,
+  onOpenAdminPanel,
   onCopiedCode,
 }: DashboardScreenProps) {
   const group = state.activeGroup;
-  const events = state.eventsState.status === 'success' ? state.eventsState.data : [];
+  const events = useMemo(
+    () => (state.eventsState.status === 'success' ? state.eventsState.data : []),
+    [state.eventsState]
+  );
   const members = useMemo(
     () => (state.membersState.status === 'success' ? state.membersState.data : []),
     [state.membersState]
@@ -96,9 +105,9 @@ export function DashboardScreen({
     ).length;
   }, [notifications, state.currentRole]);
 
-  const openTasks = useMemo(() => {
+  const allOpenTasks = useMemo(() => {
     const flat = Object.values(state.allTasksByEvent).flat();
-    return flat.filter((t) => t.assignedCount < t.capacity).slice(0, 4);
+    return flat.filter((t) => t.assignedCount < t.capacity);
   }, [state.allTasksByEvent]);
 
   const [reminderEvent, setReminderEvent] = useState<RallyEvent | null>(null);
@@ -106,41 +115,91 @@ export function DashboardScreen({
   const [showEditNameDialog, setShowEditNameDialog] = useState(false);
   const [nameInput, setNameInput] = useState(state.currentUserName);
   const [showAllMembers, setShowAllMembers] = useState(false);
+  const [showAllEvents, setShowAllEvents] = useState(false);
+  const [showAllOpenTasks, setShowAllOpenTasks] = useState(false);
+
+  const openTasks = useMemo(
+    () => (showAllOpenTasks ? allOpenTasks : allOpenTasks.slice(0, 4)),
+    [allOpenTasks, showAllOpenTasks]
+  );
+  const visibleEvents = useMemo(
+    () => (showAllEvents ? events : events.slice(0, 4)),
+    [events, showAllEvents]
+  );
 
   const canManageEvents = ROLE_META[state.currentRole].canManageEventsAndTasks;
   const canAdmin = ROLE_META[state.currentRole].canAccessAdminPanel;
+  const groupBg = useMemo(
+    () =>
+      getGroupBackgroundPresentation(
+        group?.groupBackground ?? (group ? state.groupBackgroundsById[group.id] : null)
+      ),
+    [group, state.groupBackgroundsById]
+  );
 
   return (
     <div className="mx-auto w-full max-w-[860px] space-y-4 px-4 py-5 sm:px-6">
       {/* Live Group Header Banner */}
       <div
-        className="rounded-3xl p-5 text-white shadow-md sm:p-6"
-        style={{
-          background: 'linear-gradient(135deg, #1B4DFF 0%, #1034B8 100%)',
-        }}
+        data-testid="dashboard_group_banner"
+        className={`rounded-3xl p-5 shadow-md sm:p-6 ${
+          groupBg.isLightBg ? 'text-slate-900' : 'text-white'
+        }`}
+        style={groupBg.style}
       >
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-white/90">
-            <Cloud className="h-4 w-4 text-white/85" />
+          <div
+            className={`flex items-center gap-1.5 text-xs font-medium ${
+              groupBg.isLightBg ? 'text-slate-700' : 'text-white/90'
+            }`}
+          >
+            <Cloud
+              className={`h-4 w-4 ${groupBg.isLightBg ? 'text-slate-700' : 'text-white/85'}`}
+            />
             <span>Live Cloud Sync</span>
           </div>
           <RoleBadge role={state.currentRole} />
         </div>
 
-        <h1 className="mt-2.5 font-display text-2xl font-bold tracking-tight sm:text-3xl">
-          {group?.name ?? 'RallyHub Group'}
-        </h1>
+        <div className="mt-3 flex items-center gap-3.5">
+          <GroupAvatar
+            groupName={group?.name ?? 'RallyHub Group'}
+            imageUrl={
+              group?.groupImageUrl ?? (group ? state.groupImagesById[group.id] : null) ?? null
+            }
+            size="lg"
+            tone={groupBg.isLightBg ? 'on-light' : 'on-dark'}
+            testId="dashboard_group_avatar"
+          />
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate font-display text-2xl font-bold tracking-tight sm:text-3xl">
+              {group?.name ?? 'RallyHub Group'}
+            </h1>
 
-        {group?.description && (
-          <p className="mt-1 line-clamp-2 text-sm text-white/85">{group.description}</p>
-        )}
+            {group?.description && (
+              <p
+                className={`mt-1 line-clamp-2 text-sm ${
+                  groupBg.isLightBg ? 'text-slate-700' : 'text-white/85'
+                }`}
+              >
+                {group.description}
+              </p>
+            )}
+          </div>
+        </div>
 
         {leadershipMembers.length > 0 && (
           <div
             data-testid="dashboard_header_admin_summary"
-            className="mt-3 flex items-center gap-1.5 text-xs font-medium text-white/95"
+            className={`mt-3 flex items-center gap-1.5 text-xs font-medium ${
+              groupBg.isLightBg ? 'text-slate-800' : 'text-white/95'
+            }`}
           >
-            <Shield className="h-3.5 w-3.5 shrink-0 text-white/90" />
+            <Shield
+              className={`h-3.5 w-3.5 shrink-0 ${
+                groupBg.isLightBg ? 'text-slate-800' : 'text-white/90'
+              }`}
+            />
             <span className="truncate">
               Admin:{' '}
               {leadershipMembers
@@ -150,7 +209,11 @@ export function DashboardScreen({
           </div>
         )}
 
-        <div className="mt-2 flex items-center gap-2 text-xs text-white/90">
+        <div
+          className={`mt-2 flex items-center gap-2 text-xs ${
+            groupBg.isLightBg ? 'text-slate-700' : 'text-white/90'
+          }`}
+        >
           <span className="truncate">Signed in as {state.currentUserName}</span>
           <button
             type="button"
@@ -160,7 +223,11 @@ export function DashboardScreen({
             }}
             data-testid="edit_display_name_button"
             title="Edit display name"
-            className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-white/15 text-white transition hover:bg-white/25"
+            className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition ${
+              groupBg.isLightBg
+                ? 'bg-slate-900/10 text-slate-900 hover:bg-slate-900/20'
+                : 'bg-white/15 text-white hover:bg-white/25'
+            }`}
           >
             <Pencil className="h-3.5 w-3.5" />
           </button>
@@ -305,7 +372,26 @@ export function DashboardScreen({
 
       {/* Upcoming Events */}
       <section className="space-y-2.5 pt-1">
-        <h2 className="font-display text-lg font-bold">Upcoming Events</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="font-display text-lg font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
+            Upcoming Events{events.length > 0 ? ` (${events.length})` : ''}
+          </h2>
+          {events.length > 4 && (
+            <button
+              type="button"
+              onClick={() => setShowAllEvents((prev) => !prev)}
+              data-testid="toggle_all_events_button"
+              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50"
+            >
+              <span>{showAllEvents ? 'Show fewer' : `Show all (${events.length})`}</span>
+              {showAllEvents ? (
+                <ChevronUp className="h-4 w-4" />
+              ) : (
+                <ChevronDown className="h-4 w-4" />
+              )}
+            </button>
+          )}
+        </div>
         {events.length === 0 ? (
           <EmptyDashboardCard
             message={
@@ -316,10 +402,11 @@ export function DashboardScreen({
           />
         ) : (
           <div className="space-y-2.5">
-            {events.slice(0, 4).map((evt) => {
+            {visibleEvents.map((evt) => {
               const evtTasks = state.allTasksByEvent[evt.id] ?? [];
-              const remindedAtMs = state.remindedTimes[evt.id] ?? null;
-              const isReminded = remindedAtMs !== null;
+              const evtReminders = state.remindedTimes[evt.id] ?? [];
+              const isReminded = evtReminders.length > 0;
+              const isRemind30m = isReminderAt30mSet(evtReminders, evt.startEpochMs);
               const totalAssigned = evtTasks.reduce((a, t) => a + t.assignedCount, 0);
               const totalCapacity = evtTasks.reduce((a, t) => a + t.capacity, 0);
               return (
@@ -352,9 +439,13 @@ export function DashboardScreen({
                         {formatDateTime(evt.startEpochMs)} • {evt.location}
                       </span>
                     </div>
-                    {remindedAtMs !== null && (
+                    {isReminded && (
                       <div className="mt-1 text-xs font-medium text-[var(--rally-secondary)]">
-                        Reminder: {formatDateTime(remindedAtMs)}
+                        {isRemind30m && evtReminders.length === 1
+                          ? `In-app reminder 30m before (${formatDateTime(evtReminders[0])})`
+                          : evtReminders.length === 1
+                            ? `Reminder: ${formatDateTime(evtReminders[0])}`
+                            : `${evtReminders.length} reminders set (next: ${formatDateTime(evtReminders[0])})`}
                       </div>
                     )}
                     {evtTasks.length > 0 && (
@@ -363,22 +454,46 @@ export function DashboardScreen({
                       </div>
                     )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setReminderEvent(evt);
-                    }}
-                    data-testid={`remind_event_${evt.id}`}
-                    title="Set or edit event reminder"
-                    className="shrink-0 rounded-xl p-2 hover:bg-[var(--rally-surface-variant)]"
-                  >
-                    {isReminded ? (
-                      <BellRing className="h-5 w-5 text-[var(--rally-secondary)]" />
-                    ) : (
-                      <Bell className="h-5 w-5 text-[var(--rally-on-surface-variant)]" />
-                    )}
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        actions.toggleEventReminder30m(evt);
+                      }}
+                      aria-pressed={isRemind30m}
+                      data-testid={`toggle_remind_event_${evt.id}`}
+                      title={
+                        isRemind30m
+                          ? 'Turn off 30-minute in-app reminder'
+                          : 'Remind me 30 minutes before start'
+                      }
+                      className={`inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition ${
+                        isRemind30m
+                          ? 'border-[var(--rally-secondary)]/50 bg-[var(--rally-secondary-container)] text-[var(--rally-on-secondary-container)] hover:brightness-95'
+                          : 'border-[var(--rally-outline)] bg-[var(--rally-surface)] text-[var(--rally-on-surface)] hover:bg-[var(--rally-surface-variant)]'
+                      }`}
+                    >
+                      {isRemind30m ? (
+                        <BellRing className="h-3.5 w-3.5 text-[var(--rally-secondary)]" />
+                      ) : (
+                        <Bell className="h-3.5 w-3.5 text-[var(--rally-on-surface-variant)]" />
+                      )}
+                      <span>{isRemind30m ? 'Reminded (30m)' : 'Remind Me'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setReminderEvent(evt);
+                      }}
+                      data-testid={`remind_event_${evt.id}`}
+                      title="Custom reminder times"
+                      className="shrink-0 rounded-xl p-2 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+                    >
+                      <Clock className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -388,7 +503,26 @@ export function DashboardScreen({
 
       {/* Open Tasks Needing Sign-Ups */}
       <section className="space-y-2.5 pt-1">
-        <h2 className="font-display text-lg font-bold">Open Tasks Needing Sign-Ups</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="font-display text-lg font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
+            Open Tasks Needing Sign-Ups{allOpenTasks.length > 0 ? ` (${allOpenTasks.length})` : ''}
+          </h2>
+          {allOpenTasks.length > 4 && (
+            <button
+              type="button"
+              onClick={() => setShowAllOpenTasks((prev) => !prev)}
+              data-testid="toggle_all_open_tasks_button"
+              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50"
+            >
+              <span>{showAllOpenTasks ? 'Show fewer' : `Show all (${allOpenTasks.length})`}</span>
+              {showAllOpenTasks ? (
+                <ChevronUp className="h-4 w-4" />
+              ) : (
+                <ChevronDown className="h-4 w-4" />
+              )}
+            </button>
+          )}
+        </div>
         {openTasks.length === 0 ? (
           <EmptyDashboardCard message="All current event tasks are filled or none are posted yet." />
         ) : (
@@ -405,12 +539,24 @@ export function DashboardScreen({
         )}
       </section>
 
+      {/* Recent Activity Log for Group Managers (Organizers, Admins, Creator) */}
+      {canManageEvents && (
+        <ActivityLog
+          activityLogsState={state.activityLogsState}
+          currentUserId={state.currentUserId}
+          compact
+          onOpenFullLog={canAdmin ? onOpenAdminPanel : undefined}
+        />
+      )}
+
       {/* Reminder Dialog */}
       <ReminderEditorDialog
         open={reminderEvent !== null}
         itemTitle={reminderEvent?.title ?? ''}
         targetEpochMs={reminderEvent?.startEpochMs ?? 0}
-        currentReminderEpochMs={reminderEvent ? (state.remindedTimes[reminderEvent.id] ?? null) : null}
+        currentReminderEpochMsList={
+          reminderEvent ? (state.remindedTimes[reminderEvent.id] ?? []) : []
+        }
         onClose={() => setReminderEvent(null)}
         onSave={(triggerMs) => {
           if (!reminderEvent) return;
@@ -420,12 +566,13 @@ export function DashboardScreen({
             `Location: ${reminderEvent.location} (${formatDateTime(reminderEvent.startEpochMs)})`,
             triggerMs
           );
-          setReminderEvent(null);
         }}
-        onRemove={() => {
+        onRemove={(triggerAtMs) => {
           if (!reminderEvent) return;
-          actions.removeReminder(reminderEvent.id);
-          setReminderEvent(null);
+          actions.removeReminder(reminderEvent.id, triggerAtMs);
+          if (triggerAtMs === undefined) {
+            setReminderEvent(null);
+          }
         }}
       />
 
@@ -521,6 +668,9 @@ function GroupRosterCard({
   expanded: boolean;
   onToggleExpand: () => void;
 }) {
+  const [expandedLimit, setExpandedLimit] = useState(50);
+  const memberLimit = expanded ? expandedLimit : 6;
+
   return (
     <div
       data-testid="dashboard_members_card"
@@ -533,7 +683,7 @@ function GroupRosterCard({
         </div>
         {membersState.status === 'success' && (
           <span className="text-xs font-medium text-[var(--rally-on-surface-variant)]">
-            {membersState.data.length} total
+            {membersState.data.length} / 500
           </span>
         )}
       </div>
@@ -561,10 +711,7 @@ function GroupRosterCard({
             </p>
           ) : (
             <div className="space-y-2">
-              {(expanded || membersState.data.length <= 6
-                ? membersState.data
-                : membersState.data.slice(0, 6)
-              ).map((member) => (
+              {membersState.data.slice(0, memberLimit).map((member) => (
                 <DashboardMemberRow
                   key={member.uid}
                   member={member}
@@ -572,15 +719,29 @@ function GroupRosterCard({
                 />
               ))}
               {membersState.data.length > 6 && (
-                <div className="flex justify-end">
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {expanded && membersState.data.length > expandedLimit && (
+                    <button
+                      type="button"
+                      onClick={() => setExpandedLimit((limit) => limit + 50)}
+                      className="rounded-lg px-2.5 py-1 text-xs font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50"
+                    >
+                      Show 50 more ({membersState.data.length - expandedLimit} remaining)
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={onToggleExpand}
+                    onClick={() => {
+                      if (expanded) setExpandedLimit(50);
+                      onToggleExpand();
+                    }}
                     data-testid="toggle_all_members_button"
                     className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-semibold text-[var(--rally-primary)] hover:bg-[var(--rally-primary-container)]/50"
                   >
                     <span>
-                      {expanded ? 'Show fewer' : `Show all ${membersState.data.length} members`}
+                      {expanded
+                        ? 'Show fewer'
+                        : `Show ${Math.min(50, membersState.data.length)} of ${membersState.data.length} members`}
                     </span>
                     {expanded ? (
                       <ChevronUp className="h-4 w-4" />

@@ -21,6 +21,10 @@
         "email": { "type": "string", "description": "Private user email." },
         "photoUrl": { "type": "string", "description": "Optional avatar URL." },
         "activeGroupId": { "type": "string", "description": "Optional last active group ID." },
+        "smsPhone": { "type": "string", "description": "Optional E.164 mobile phone number for SMS push alerts (PII isolated to owner)." },
+        "smsEnabled": { "type": "boolean", "description": "Master opt-in for SMS push notifications." },
+        "smsForMessages": { "type": "boolean", "description": "Receive SMS push notifications for new group chat messages." },
+        "smsForEvents": { "type": "boolean", "description": "Receive SMS push notifications for calendar events and reminders." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
       },
@@ -35,6 +39,8 @@
         "groupName": { "type": "string" },
         "groupCode": { "type": "string" },
         "role": { "type": "string", "enum": ["CREATOR", "ADMIN", "ORGANIZER", "PARTICIPANT"] },
+        "groupBackground": { "type": "string", "description": "Optional group banner background preset or hex spec." },
+        "groupImageUrl": { "type": "string", "description": "Optional group profile image URL (HTTPS or compressed base64 image data URI)." },
         "joinedAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -63,6 +69,8 @@
         "description": { "type": "string" },
         "groupCode": { "type": "string" },
         "ownerId": { "type": "string", "description": "UID of the group creator with full control." },
+        "groupBackground": { "type": "string", "description": "Optional custom background preset or hex spec for group banner and cards." },
+        "groupImageUrl": { "type": "string", "description": "Optional group profile image URL (HTTPS or compressed base64 image data URI) set by the group creator." },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -177,9 +185,67 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "body", "notificationType", "targetScope", "targetRole", "senderId", "senderName", "createdAt"]
+    },
+    "ActivityLogEntry": {
+      "title": "ActivityLogEntry",
+      "description": "Audit trail entry capturing user actions within a group for manager visibility.",
+      "type": "object",
+      "properties": {
+        "actorId": { "type": "string", "description": "Firebase Auth UID of the acting member." },
+        "actorName": { "type": "string", "description": "Display name of the acting member." },
+        "actorRole": { "type": "string", "enum": ["CREATOR", "ADMIN", "ORGANIZER", "PARTICIPANT"] },
+        "category": { "type": "string", "enum": ["TASK", "CALENDAR", "MEMBER", "CHANNEL", "ALERT", "GROUP"] },
+        "action": {
+          "type": "string",
+          "enum": [
+            "TASK_CREATED",
+            "TASK_UPDATED",
+            "TASK_COMPLETED",
+            "TASK_DELETED",
+            "TASK_CLAIMED",
+            "TASK_RELEASED",
+            "EVENT_CREATED",
+            "EVENT_UPDATED",
+            "EVENT_DELETED",
+            "MEMBER_JOINED",
+            "MEMBER_ROLE_CHANGED",
+            "MEMBER_DELETED",
+            "CHANNEL_CREATED",
+            "CHANNEL_UPDATED",
+            "CHANNEL_DELETED",
+            "ALERT_SENT",
+            "ALERT_APPROVED",
+            "ALERT_DELETED",
+            "GROUP_CREATED",
+            "GROUP_UPDATED"
+          ]
+        },
+        "summary": { "type": "string", "description": "Human-readable description of the action taken." },
+        "details": { "type": "string", "description": "Optional secondary context such as event or volunteer info." },
+        "targetId": { "type": "string", "description": "Optional ID of the affected document." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorId", "actorName", "actorRole", "category", "action", "summary", "createdAt"]
+    },
+    "AppAppearance": {
+      "title": "AppAppearance",
+      "description": "Shared main application interface background setting customized by an Admin.",
+      "type": "object",
+      "properties": {
+        "appBackground": { "type": "string" },
+        "sourceGroupId": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "updatedByName": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["appBackground", "sourceGroupId", "updatedBy", "updatedByName", "updatedAt"]
     }
   },
   "firestore": {
+    "/appSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppAppearance" },
+      "description": "Global application appearance configuration writable by verified group or global admins."
+    },
     "/admins/{uid}": {
       "schema": { "$ref": "#/entities/AdminRecord" },
       "description": "Global platform admins."
@@ -223,6 +289,10 @@
     "/groups/{groupId}/notifications/{notificationId}": {
       "schema": { "$ref": "#/entities/HubNotification" },
       "description": "Targeted push alerts and announcements."
+    },
+    "/groups/{groupId}/activityLogs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLogEntry" },
+      "description": "Immutable group activity log entries visible to group managers."
     }
   }
 }
