@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import {
+  AlertTriangle,
   Calendar,
+  ExternalLink,
   Loader2,
   MessageSquare,
   ShieldCheck,
@@ -12,6 +14,8 @@ import { OfflineStatusBadge } from '../RallyComponents';
 interface AuthAndJoinScreenProps {
   onJoinWithCodeWithGoogle: (code: string, displayName: string) => Promise<void>;
   onStandardGoogleSignIn: () => Promise<void>;
+  onRedirectGoogleSignIn: () => Promise<void>;
+  showApkHelp: boolean;
   authError: string | null;
   onClearError: () => void;
 }
@@ -19,6 +23,8 @@ interface AuthAndJoinScreenProps {
 export function AuthAndJoinScreen({
   onJoinWithCodeWithGoogle,
   onStandardGoogleSignIn,
+  onRedirectGoogleSignIn,
+  showApkHelp,
   authError,
   onClearError,
 }: AuthAndJoinScreenProps) {
@@ -27,9 +33,14 @@ export function AuthAndJoinScreen({
   const [localError, setLocalError] = useState<string | null>(null);
   const [isJoiningWithCode, setIsJoiningWithCode] = useState(false);
   const [isGoogleSigningIn, setIsGoogleSigningIn] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
-  const anyBusy = isJoiningWithCode || isGoogleSigningIn;
+  const anyBusy = isJoiningWithCode || isGoogleSigningIn || isRedirecting;
   const displayedError = localError || authError;
+  const currentUrl =
+    typeof window !== 'undefined' && window.location.protocol.startsWith('http')
+      ? window.location.href
+      : null;
 
   const handleJoinClick = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,6 +67,17 @@ export function AuthAndJoinScreen({
       await onStandardGoogleSignIn();
     } finally {
       setIsGoogleSigningIn(false);
+    }
+  };
+
+  const handleRedirectSignIn = async () => {
+    setLocalError(null);
+    onClearError();
+    setIsRedirecting(true);
+    try {
+      await onRedirectGoogleSignIn();
+    } finally {
+      setIsRedirecting(false);
     }
   };
 
@@ -205,6 +227,59 @@ export function AuthAndJoinScreen({
             )}
           </button>
         </div>
+
+        {/* APK / Android WebView Sign-In Fallback & Help */}
+        {showApkHelp && (
+          <div
+            data-testid="apk_auth_help_card"
+            className="space-y-3 rounded-3xl border border-[var(--rally-outline)]/70 bg-[var(--rally-surface)] p-5 shadow-sm sm:p-6"
+          >
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[var(--rally-secondary)]" />
+              <div className="space-y-1 text-xs text-[var(--rally-on-surface-variant)]">
+                <div className="font-display text-sm font-bold text-[var(--rally-on-surface)]">
+                  Signing in from an Android APK or WebView?
+                </div>
+                <p>
+                  Google blocks OAuth popups and standard Android WebViews (
+                  <code className="font-mono-code">403 disallowed_useragent</code>). Use Redirect
+                  Sign-In, open RallyHub in Chrome, or package your APK as a Trusted Web Activity
+                  (TWA) / Chrome Custom Tabs.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={anyBusy}
+                onClick={() => void handleRedirectSignIn()}
+                data-testid="google_redirect_sign_in_button"
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-[var(--rally-secondary)] px-3.5 py-2.5 text-xs font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {isRedirecting ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Redirecting...</span>
+                  </>
+                ) : (
+                  <span>Use Redirect Sign-In</span>
+                )}
+              </button>
+              {currentUrl && (
+                <a
+                  href={currentUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)]"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  <span>Open in Browser</span>
+                </a>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

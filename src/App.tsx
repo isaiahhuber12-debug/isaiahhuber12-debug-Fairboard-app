@@ -12,10 +12,22 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
-import { auth, googleProvider } from './lib/firebase';
+import {
+  getRedirectResult,
+  onAuthStateChanged,
+  signInWithPopup,
+  signInWithRedirect,
+  signOut,
+  type User,
+} from 'firebase/auth';
+import {
+  auth,
+  getAuthFriendlyError,
+  googleProvider,
+  isEmbeddedWebView,
+  isUnsupportedSchemeForFirebaseAuth,
+} from './lib/firebase';
 import { getAppBackgroundPresentation } from './lib/backgrounds';
-import { getFriendlyErrorMessage } from './lib/firestoreError';
 import { useAiCoordinator } from './hooks/useAiCoordinator';
 import { useRallyWorkspace } from './hooks/useRallyWorkspace';
 import { type HubTab, ROLE_META } from './types/rally';
@@ -43,14 +55,49 @@ const ALL_TABS: NavTabItem[] = [
   { id: 'admin', label: 'Admin', icon: ShieldCheck },
 ];
 
+const PENDING_JOIN_STORAGE_KEY = 'rallyhub_pending_join_v1';
+
+function readStoredPendingJoin(): { code: string; displayName: string | null } | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_JOIN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { code?: unknown; displayName?: unknown };
+    if (typeof parsed.code === 'string' && parsed.code.trim()) {
+      return {
+        code: parsed.code.trim(),
+        displayName:
+          typeof parsed.displayName === 'string' && parsed.displayName.trim()
+            ? parsed.displayName.trim()
+            : null,
+      };
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return null;
+}
+
+function writeStoredPendingJoin(join: { code: string; displayName: string | null } | null): void {
+  try {
+    if (!join) {
+      sessionStorage.removeItem(PENDING_JOIN_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(PENDING_JOIN_STORAGE_KEY, JSON.stringify(join));
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
 export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [showApkAuthHelp, setShowApkAuthHelp] = useState(() => isEmbeddedWebView());
   const [pendingJoin, setPendingJoin] = useState<{
     code: string;
     displayName: string | null;
-  } | null>(null);
+  } | null>(() => readStoredPendingJoin());
 
   const [isDarkMode, setIsDarkMode] = useState(() =>
     typeof window !== 'undefined' &&
@@ -70,47 +117,129 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    void getRedirectResult(auth)
+      .then((result) => {
+        if (!active) return;
+        if (result?.user) {
+          const restored = readStoredPendingJoin();
+          if (restored) setPendingJoin(restored);
+        }
+      })
+      .catch((err) => {
+        if (!active) return;
+        writeStoredPendingJoin(null);
+        setPendingJoin(null);
+        const friendly = getAuthFriendlyError(err);
+        setAuthError(friendly.message);
+        if (friendly.showApkHelp) setShowApkAuthHelp(true);
+      });
+
     const unsub = onAuthStateChanged(auth, (nextUser) => {
+      if (!active) return;
       setUser(nextUser);
       setAuthReady(true);
     });
-    return unsub;
+    return () => {
+      active = false;
+      unsub();
+    };
   }, []);
 
-  const handleGoogleSignIn = useCallback(async () => {
-    setAuthError(null);
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      const code =
-        err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
-      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-        setPendingJoin(null);
+  const triggerRedirectSignIn = useCallback(
+    async (nextPendingJoin: { code: string; displayName: string | null } | null) => {
+      setAuthError(null);
+      if (isUnsupportedSchemeForFirebaseAuth()) {
+        setShowApkAuthHelp(true);
+        setAuthError(
+          'Google Sign-In cannot run from a local file:// or custom APK scheme. Load the hosted HTTPS app URL in Chrome or package the app as a Trusted Web Activity (TWA).'
+        );
         return;
       }
-      setPendingJoin(null);
-      setAuthError(getFriendlyErrorMessage(err, 'Google Sign-In failed. Please try again.'));
-    }
-  }, []);
+      writeStoredPendingJoin(nextPendingJoin);
+      try {
+        await signInWithRedirect(auth, googleProvider);
+      } catch (err) {
+        writeStoredPendingJoin(null);
+        setPendingJoin(null);
+        const friendly = getAuthFriendlyError(err);
+        setAuthError(friendly.message);
+        if (friendly.showApkHelp) setShowApkAuthHelp(true);
+      }
+    },
+    []
+  );
+
+  const handleGoogleSignIn = useCallback(
+    async (nextPendingJoin: { code: string; displayName: string | null } | null) => {
+      setAuthError(null);
+      if (isUnsupportedSchemeForFirebaseAuth()) {
+        setShowApkAuthHelp(true);
+        setAuthError(
+          'Google Sign-In cannot run from a local file:// or custom APK scheme. Load the hosted HTTPS app URL in Chrome or package the app as a Trusted Web Activity (TWA).'
+        );
+        return;
+      }
+
+      if (isEmbeddedWebView()) {
+        setShowApkAuthHelp(true);
+        await triggerRedirectSignIn(nextPendingJoin);
+        return;
+      }
+
+      try {
+        await signInWithPopup(auth, googleProvider);
+      } catch (err) {
+        const code =
+          err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
+        if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+          setPendingJoin(null);
+          writeStoredPendingJoin(null);
+          return;
+        }
+        if (
+          code === 'auth/popup-blocked' ||
+          code === 'auth/operation-not-supported-in-this-environment'
+        ) {
+          setShowApkAuthHelp(true);
+          await triggerRedirectSignIn(nextPendingJoin);
+          return;
+        }
+        setPendingJoin(null);
+        writeStoredPendingJoin(null);
+        const friendly = getAuthFriendlyError(err);
+        setAuthError(friendly.message);
+        if (friendly.showApkHelp) setShowApkAuthHelp(true);
+      }
+    },
+    [triggerRedirectSignIn]
+  );
 
   const handleJoinWithCodeWithGoogle = useCallback(
     async (code: string, displayName: string) => {
-      setPendingJoin({
+      const nextJoin = {
         code,
         displayName: displayName.trim() || null,
-      });
-      await handleGoogleSignIn();
+      };
+      setPendingJoin(nextJoin);
+      await handleGoogleSignIn(nextJoin);
     },
     [handleGoogleSignIn]
   );
 
   const handleStandardGoogleSignIn = useCallback(async () => {
     setPendingJoin(null);
-    await handleGoogleSignIn();
+    writeStoredPendingJoin(null);
+    await handleGoogleSignIn(null);
   }, [handleGoogleSignIn]);
+
+  const handleRedirectGoogleSignIn = useCallback(async () => {
+    await triggerRedirectSignIn(pendingJoin);
+  }, [pendingJoin, triggerRedirectSignIn]);
 
   const handleSignOut = useCallback(async () => {
     setPendingJoin(null);
+    writeStoredPendingJoin(null);
     setAuthError(null);
     await signOut(auth);
   }, []);
@@ -131,6 +260,8 @@ export function App() {
       <AuthAndJoinScreen
         onJoinWithCodeWithGoogle={handleJoinWithCodeWithGoogle}
         onStandardGoogleSignIn={handleStandardGoogleSignIn}
+        onRedirectGoogleSignIn={handleRedirectGoogleSignIn}
+        showApkHelp={showApkAuthHelp}
         authError={authError}
         onClearError={() => setAuthError(null)}
       />
@@ -143,7 +274,10 @@ export function App() {
       user={user}
       isDarkMode={isDarkMode}
       pendingJoin={pendingJoin}
-      onPendingJoinConsumed={() => setPendingJoin(null)}
+      onPendingJoinConsumed={() => {
+        writeStoredPendingJoin(null);
+        setPendingJoin(null);
+      }}
       onSignOut={() => void handleSignOut()}
     />
   );
