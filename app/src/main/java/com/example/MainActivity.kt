@@ -27,8 +27,6 @@ import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.SwapHoriz
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,7 +69,6 @@ import com.example.ai.RallyAiViewModel
 import com.example.ai.configureAppCheck
 import com.example.auth.attemptAutoSignIn
 import com.example.auth.authStateFlow
-import com.example.auth.onGoogleSignInClicked
 import com.example.auth.signOutFromGoogle
 import com.example.data.remote.RallyHubRepository
 import com.example.notifications.RallyNotificationHelper
@@ -86,7 +83,6 @@ import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.NotificationsScreen
 import com.example.ui.theme.RallyHubTheme
 import com.example.ui.viewmodel.CloudRallyViewModel
-import com.example.ui.viewmodel.GuestRallyViewModel
 import com.example.ui.viewmodel.RallyWorkspaceActions
 import com.example.ui.viewmodel.RallyWorkspaceUiState
 import com.google.firebase.Firebase
@@ -128,6 +124,9 @@ fun AppNavigation() {
     val scope = rememberCoroutineScope()
     val credentialManager = remember { CredentialManager.create(context) }
 
+    var pendingJoinCode by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingJoinDisplayName by rememberSaveable { mutableStateOf<String?>(null) }
+
     LaunchedEffect(Unit) {
         attemptAutoSignIn(
             context = context,
@@ -140,14 +139,34 @@ fun AppNavigation() {
 
     val user = currentUser
     if (user == null) {
-        GuestOrJoinHost(
-            onAuthSuccess = {}
+        AuthAndJoinScreen(
+            onPrepareJoinWithCode = { code, name ->
+                pendingJoinCode = code
+                pendingJoinDisplayName = name.trim().ifBlank { null }
+            },
+            onPrepareStandardSignIn = {
+                pendingJoinCode = null
+                pendingJoinDisplayName = null
+            },
+            onAuthCancelledOrFailed = {
+                pendingJoinCode = null
+                pendingJoinDisplayName = null
+            },
+            onGoogleAuthSuccess = {}
         )
     } else {
         key(user.uid) {
             CloudWorkspaceHost(
                 currentUserId = user.uid,
+                pendingJoinCode = pendingJoinCode,
+                pendingJoinDisplayName = pendingJoinDisplayName,
+                onPendingJoinConsumed = {
+                    pendingJoinCode = null
+                    pendingJoinDisplayName = null
+                },
                 onSignOut = {
+                    pendingJoinCode = null
+                    pendingJoinDisplayName = null
                     signOutFromGoogle(credentialManager, scope)
                 }
             )
@@ -156,79 +175,11 @@ fun AppNavigation() {
 }
 
 @Composable
-private fun GuestOrJoinHost(
-    onAuthSuccess: () -> Unit
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val credentialManager = remember { CredentialManager.create(context) }
-    val guestViewModel: GuestRallyViewModel = viewModel(
-        factory = viewModelFactory {
-            initializer {
-                val app = checkNotNull(this[APPLICATION_KEY])
-                GuestRallyViewModel(app)
-            }
-        }
-    )
-    val uiState by guestViewModel.uiState.collectAsStateWithLifecycle()
-    var showAdminSignInDialog by remember { mutableStateOf(false) }
-    var authErrorBanner by remember { mutableStateOf<String?>(null) }
-
-    if (uiState.activeGroup == null) {
-        AuthAndJoinScreen(
-            onJoinWithGroupCode = { code, name ->
-                guestViewModel.joinGuestGroup(code, name)
-            },
-            onGoogleAuthSuccess = onAuthSuccess,
-            initialBanner = uiState.bannerMessage ?: authErrorBanner
-        )
-    } else {
-        RallyWorkspaceScaffold(
-            uiState = uiState,
-            actions = guestViewModel,
-            onSwitchOrLeave = { guestViewModel.leaveSession() },
-            onRequestAdminSignIn = { showAdminSignInDialog = true }
-        )
-    }
-
-    if (showAdminSignInDialog) {
-        AlertDialog(
-            onDismissRequest = { showAdminSignInDialog = false },
-            title = { Text("Admin & Cloud Sign-In") },
-            text = {
-                Text(
-                    "Sign in with Google to access Admin controls, create custom group codes, and sync live across Android and iOS."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showAdminSignInDialog = false
-                        onGoogleSignInClicked(
-                            context = context,
-                            credentialManager = credentialManager,
-                            onAuthSuccess = onAuthSuccess,
-                            onAuthError = { msg -> authErrorBanner = msg },
-                            scope = scope
-                        )
-                    },
-                    modifier = Modifier.testTag("dialog_google_signin_button")
-                ) {
-                    Text(stringResource(R.string.sign_in_with_google))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAdminSignInDialog = false }) {
-                    Text("Stay in Local Mode")
-                }
-            }
-        )
-    }
-}
-
-@Composable
 private fun CloudWorkspaceHost(
     currentUserId: String,
+    pendingJoinCode: String?,
+    pendingJoinDisplayName: String?,
+    onPendingJoinConsumed: () -> Unit,
     onSignOut: () -> Unit
 ) {
     val viewModel: CloudRallyViewModel = viewModel(
@@ -244,8 +195,27 @@ private fun CloudWorkspaceHost(
     )
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
+    LaunchedEffect(pendingJoinCode) {
+        val code = pendingJoinCode
+        if (!code.isNullOrBlank()) {
+            viewModel.joinGroupByCode(code, pendingJoinDisplayName)
+            onPendingJoinConsumed()
+        }
+    }
+
     if (uiState.activeGroup == null) {
-        Scaffold(contentWindowInsets = WindowInsets.safeDrawing) { innerPadding ->
+        val hubSnackbarHostState = remember { SnackbarHostState() }
+        LaunchedEffect(uiState.bannerMessage) {
+            val msg = uiState.bannerMessage
+            if (!msg.isNullOrBlank()) {
+                hubSnackbarHostState.showSnackbar(msg)
+                viewModel.clearBanner()
+            }
+        }
+        Scaffold(
+            snackbarHost = { SnackbarHost(hubSnackbarHostState) },
+            contentWindowInsets = WindowInsets.safeDrawing
+        ) { innerPadding ->
             Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
                 CloudGroupHubScreen(
                     uiState = uiState,

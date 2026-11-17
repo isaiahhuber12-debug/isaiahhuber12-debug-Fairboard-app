@@ -169,6 +169,41 @@ test("Group Creator can create group + custom groupCode + CREATOR member atomica
     joinedAt: ts,
     updatedAt: ts,
   });
+  batch.set(creatorDb.collection("users").doc(CREATOR_UID).collection("joinedGroups").doc(GROUP_ID), {
+    groupId: GROUP_ID,
+    groupName: "RallyHub Launch",
+    groupCode: GROUP_CODE,
+    role: "CREATOR",
+    joinedAt: ts,
+    updatedAt: ts,
+  });
+  batch.set(creatorDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ALL_ID), {
+    name: "General Lobby",
+    description: "Community announcements & participant Q&A",
+    accessLevel: "ALL",
+    createdBy: CREATOR_UID,
+    messageCount: 0,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  batch.set(creatorDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ORG_ID), {
+    name: "Event Organizers",
+    description: "Shift leads, logistics & task coordination",
+    accessLevel: "ORGANIZER",
+    createdBy: CREATOR_UID,
+    messageCount: 0,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  batch.set(creatorDb.collection("groups").doc(GROUP_ID).collection("channels").doc(CH_ADMIN_ID), {
+    name: "Admin Command",
+    description: "Private admin coordination & permissions",
+    accessLevel: "ADMIN",
+    createdBy: CREATOR_UID,
+    messageCount: 0,
+    createdAt: ts,
+    updatedAt: ts,
+  });
   await assertSucceeds(batch.commit());
 
   // Listing all groupCodes is forbidden
@@ -197,6 +232,85 @@ test("Group Creator can create group + custom groupCode + CREATOR member atomica
     adminDb.collection("groups").doc(GROUP_ID).update({
       name: "Unauthorized Admin Update Before Join",
       updatedAt: pastTime(900),
+    })
+  );
+});
+
+test("Sequential group creation (group -> code+member -> channels -> joinedGroups) succeeds", async () => {
+  const creatorDb = testEnv.authenticatedContext(CREATOR_UID).firestore();
+  const ts = pastTime(5000);
+  const seqGroupId = "grp_seq_1";
+  const seqCode = "SEQ2026";
+
+  await assertSucceeds(
+    creatorDb.collection("groups").doc(seqGroupId).set({
+      name: "Sequential Group",
+      description: "",
+      groupCode: seqCode,
+      ownerId: CREATOR_UID,
+      createdAt: ts,
+      updatedAt: ts,
+    })
+  );
+
+  const setupBatch = creatorDb.batch();
+  setupBatch.set(creatorDb.collection("groupCodes").doc(seqCode), {
+    groupId: seqGroupId,
+    groupName: "Sequential Group",
+    createdBy: CREATOR_UID,
+    active: true,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  setupBatch.set(creatorDb.collection("groups").doc(seqGroupId).collection("members").doc(CREATOR_UID), {
+    uid: CREATOR_UID,
+    displayName: "Clara Creator",
+    role: "CREATOR",
+    tasksSignedUpCount: 0,
+    messagesSentCount: 0,
+    joinedAt: ts,
+    updatedAt: ts,
+  });
+  await assertSucceeds(setupBatch.commit());
+
+  const channelBatch = creatorDb.batch();
+  channelBatch.set(creatorDb.collection("groups").doc(seqGroupId).collection("channels").doc(CH_ALL_ID), {
+    name: "General Lobby",
+    description: "Community announcements & participant Q&A",
+    accessLevel: "ALL",
+    createdBy: CREATOR_UID,
+    messageCount: 0,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  channelBatch.set(creatorDb.collection("groups").doc(seqGroupId).collection("channels").doc(CH_ORG_ID), {
+    name: "Event Organizers",
+    description: "Shift leads, logistics & task coordination",
+    accessLevel: "ORGANIZER",
+    createdBy: CREATOR_UID,
+    messageCount: 0,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  channelBatch.set(creatorDb.collection("groups").doc(seqGroupId).collection("channels").doc(CH_ADMIN_ID), {
+    name: "Admin Command",
+    description: "Private admin coordination & permissions",
+    accessLevel: "ADMIN",
+    createdBy: CREATOR_UID,
+    messageCount: 0,
+    createdAt: ts,
+    updatedAt: ts,
+  });
+  await assertSucceeds(channelBatch.commit());
+
+  await assertSucceeds(
+    creatorDb.collection("users").doc(CREATOR_UID).collection("joinedGroups").doc(seqGroupId).set({
+      groupId: seqGroupId,
+      groupName: "Sequential Group",
+      groupCode: seqCode,
+      role: "CREATOR",
+      joinedAt: ts,
+      updatedAt: ts,
     })
   );
 });
@@ -902,6 +1016,42 @@ test("Regular members can message and submit PENDING announcements, but only Adm
   );
 });
 
+test("Joined participant can view Creator/Admins in members roster and update own displayName on re-join", async () => {
+  await seedBaseGroup();
+  const partDb = testEnv.authenticatedContext(PARTICIPANT_UID).firestore();
+  const ts = pastTime(2000);
 
+  await assertSucceeds(
+    partDb.collection("users").doc(PARTICIPANT_UID).collection("joinedGroups").doc(GROUP_ID).set({
+      groupId: GROUP_ID,
+      groupName: "Annual Summit 2026",
+      groupCode: GROUP_CODE,
+      role: "PARTICIPANT",
+      joinedAt: ts,
+      updatedAt: ts,
+    })
+  );
 
+  // Joined participant can list members and see CREATOR & ADMIN
+  const membersSnap = await assertSucceeds(
+    partDb.collection("groups").doc(GROUP_ID).collection("members").get()
+  );
+  const rolesByUid = Object.fromEntries(membersSnap.docs.map((d) => [d.id, d.data().role]));
+  if (rolesByUid[CREATOR_UID] !== "CREATOR" || rolesByUid[ADMIN_UID] !== "ADMIN") {
+    throw new Error(`Expected CREATOR and ADMIN in roster, got: ${JSON.stringify(rolesByUid)}`);
+  }
 
+  // Re-joining with a new displayName via batch update succeeds
+  const rejoinBatch = partDb.batch();
+  rejoinBatch.update(partDb.collection("groups").doc(GROUP_ID).collection("members").doc(PARTICIPANT_UID), {
+    displayName: "Patty Custom",
+    updatedAt: pastTime(500),
+  });
+  rejoinBatch.update(partDb.collection("users").doc(PARTICIPANT_UID).collection("joinedGroups").doc(GROUP_ID), {
+    groupName: "Annual Summit 2026",
+    groupCode: GROUP_CODE,
+    role: "PARTICIPANT",
+    updatedAt: pastTime(500),
+  });
+  await assertSucceeds(rejoinBatch.commit());
+});

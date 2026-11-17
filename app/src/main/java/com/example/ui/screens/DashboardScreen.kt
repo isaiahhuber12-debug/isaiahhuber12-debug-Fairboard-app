@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -26,10 +27,14 @@ import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -58,7 +63,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.ApprovalStatus
 import com.example.data.model.EventTask
+import com.example.data.model.GroupMember
 import com.example.data.model.HubNotification
+import com.example.data.model.MemberRole
 import com.example.data.model.NotificationType
 import com.example.data.model.RallyEvent
 import com.example.ui.components.GroupCodePill
@@ -89,6 +96,10 @@ fun DashboardScreen(
 ) {
     val group = uiState.activeGroup
     val events = (uiState.eventsState as? UiState.Success)?.data.orEmpty()
+    val members = (uiState.membersState as? UiState.Success)?.data.orEmpty()
+    val leadershipMembers = remember(members) {
+        members.filter { it.parsedRole() == MemberRole.CREATOR || it.parsedRole() == MemberRole.ADMIN }
+    }
     val notifications = (uiState.notificationsState as? UiState.Success)?.data.orEmpty()
     val latestAnnouncement = notifications.firstOrNull {
         it.parsedType() == NotificationType.ANNOUNCEMENT && it.parsedApprovalStatus() == ApprovalStatus.APPROVED
@@ -104,6 +115,7 @@ fun DashboardScreen(
     var reminderEvent by remember { mutableStateOf<RallyEvent?>(null) }
     var deleteSpotlightNotif by remember { mutableStateOf<HubNotification?>(null) }
     var showEditNameDialog by remember { mutableStateOf(false) }
+    var showAllMembers by remember { mutableStateOf(false) }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -162,6 +174,32 @@ fun DashboardScreen(
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
+                        }
+
+                        if (leadershipMembers.isNotEmpty()) {
+                            val leaderSummary = leadershipMembers.joinToString(", ") { member ->
+                                if (member.uid == uiState.currentUserId) "${member.displayName} (You)"
+                                else member.displayName
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.testTag("dashboard_header_admin_summary")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Shield,
+                                    contentDescription = null,
+                                    tint = Color.White.copy(alpha = 0.9f),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = "Admin: $leaderSummary",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color.White.copy(alpha = 0.94f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
 
                         Row(
@@ -330,6 +368,16 @@ fun DashboardScreen(
                         modifier = Modifier.weight(1f)
                     )
                 }
+            }
+
+            // Group Admins & Members Roster (visible to all roles)
+            item {
+                GroupRosterCard(
+                    membersState = uiState.membersState,
+                    currentUserId = uiState.currentUserId,
+                    expanded = showAllMembers,
+                    onToggleExpand = { showAllMembers = !showAllMembers }
+                )
             }
 
             // Latest Pinned Approved Announcement
@@ -705,6 +753,172 @@ private fun QuickTaskCard(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+@Composable
+private fun GroupRosterCard(
+    membersState: UiState<List<GroupMember>>,
+    currentUserId: String,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.large,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("dashboard_members_card")
+    ) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Group,
+                        contentDescription = null,
+                        tint = CobaltPrimary
+                    )
+                    Text(
+                        text = "Group Admins & Members",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                if (membersState is UiState.Success) {
+                    Text(
+                        text = "${membersState.data.size} total",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            when (membersState) {
+                is UiState.Loading -> {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        text = "Syncing group admins and members...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                is UiState.Error -> {
+                    Text(
+                        text = membersState.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                is UiState.Success -> {
+                    val allMembers = membersState.data
+                    if (allMembers.isEmpty()) {
+                        Text(
+                            text = "No members synced yet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        val visibleMembers = if (expanded || allMembers.size <= 6) {
+                            allMembers
+                        } else {
+                            allMembers.take(6)
+                        }
+                        visibleMembers.forEach { member ->
+                            DashboardMemberRow(
+                                member = member,
+                                isCurrentUser = member.uid == currentUserId
+                            )
+                        }
+                        if (allMembers.size > 6) {
+                            TextButton(
+                                onClick = onToggleExpand,
+                                modifier = Modifier
+                                    .align(Alignment.End)
+                                    .testTag("toggle_all_members_button")
+                            ) {
+                                Text(
+                                    if (expanded) "Show fewer"
+                                    else "Show all ${allMembers.size} members"
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DashboardMemberRow(
+    member: GroupMember,
+    isCurrentUser: Boolean
+) {
+    val role = member.parsedRole()
+    val isLeadership = role == MemberRole.CREATOR || role == MemberRole.ADMIN
+    val initial = member.displayName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+
+    Surface(
+        color = if (isLeadership) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        },
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("dashboard_member_row_${member.uid}")
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(if (isLeadership) CobaltPrimary else MaterialTheme.colorScheme.secondaryContainer)
+            ) {
+                Text(
+                    text = initial,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isLeadership) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (isCurrentUser) "${member.displayName} (You)" else member.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (isLeadership || isCurrentUser) FontWeight.SemiBold else FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            RoleBadge(role = role)
         }
     }
 }

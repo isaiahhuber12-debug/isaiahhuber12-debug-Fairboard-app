@@ -291,80 +291,98 @@ class RallyHubRepository(
                 return Result.failure(IllegalArgumentException("Group code '$normalizedCode' is already taken."))
             }
 
-            val displayName = (auth.currentUser?.displayName?.takeIf { it.isNotBlank() }
-                ?: auth.currentUser?.email?.substringBefore("@")
+            val displayName = (auth.currentUser?.displayName?.trim()?.takeIf { it.isNotBlank() }
+                ?: auth.currentUser?.email?.substringBefore("@")?.trim()?.takeIf { it.isNotBlank() }
                 ?: "Creator").take(60)
 
-            val batch = db.batch()
+            val trimmedName = groupName.trim()
+            val trimmedDesc = description.trim().take(500)
             val groupRef = db.collection("groups").document(groupId)
-            batch.set(
-                groupRef,
+
+            // Step 1: Create the group document first so subsequent writes can verify ownership directly.
+            groupRef.set(
                 mapOf(
-                    "name" to groupName.trim(),
-                    "description" to description.trim().take(500),
+                    "name" to trimmedName,
+                    "description" to trimmedDesc,
                     "groupCode" to normalizedCode,
                     "ownerId" to uid,
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-            )
-            batch.set(
-                db.collection("groupCodes").document(normalizedCode),
-                mapOf(
-                    "groupId" to groupId,
-                    "groupName" to groupName.trim(),
-                    "createdBy" to uid,
-                    "active" to true,
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
-            batch.set(
-                groupRef.collection("members").document(uid),
-                mapOf(
-                    "uid" to uid,
-                    "displayName" to displayName,
-                    "role" to MemberRole.CREATOR.name,
-                    "tasksSignedUpCount" to 0L,
-                    "messagesSentCount" to 0L,
-                    "joinedAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
-            batch.set(
-                db.collection("users").document(uid).collection("joinedGroups").document(groupId),
-                mapOf(
-                    "groupId" to groupId,
-                    "groupName" to groupName.trim(),
-                    "groupCode" to normalizedCode,
-                    "role" to MemberRole.CREATOR.name,
-                    "joinedAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
+            ).await()
 
-            // Default role-tiered channels
-            val defaultChannels = listOf(
-                Triple("general", "General Lobby", ChannelAccessLevel.ALL.name to "Community announcements & participant Q&A"),
-                Triple("organizers", "Event Organizers", ChannelAccessLevel.ORGANIZER.name to "Shift leads, logistics & task coordination"),
-                Triple("admins", "Admin Command", ChannelAccessLevel.ADMIN.name to "Private admin coordination & permissions")
-            )
-            defaultChannels.forEach { (idSuffix, title, levelPair) ->
-                batch.set(
-                    groupRef.collection("channels").document("ch_$idSuffix"),
+            try {
+                // Step 2: Claim the group code and register creator membership.
+                val setupBatch = db.batch()
+                setupBatch.set(
+                    db.collection("groupCodes").document(normalizedCode),
                     mapOf(
-                        "name" to title,
-                        "description" to levelPair.second,
-                        "accessLevel" to levelPair.first,
+                        "groupId" to groupId,
+                        "groupName" to trimmedName,
                         "createdBy" to uid,
-                        "messageCount" to 0L,
+                        "active" to true,
                         "createdAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 )
+                setupBatch.set(
+                    groupRef.collection("members").document(uid),
+                    mapOf(
+                        "uid" to uid,
+                        "displayName" to displayName,
+                        "role" to MemberRole.CREATOR.name,
+                        "tasksSignedUpCount" to 0L,
+                        "messagesSentCount" to 0L,
+                        "joinedAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                setupBatch.commit().await()
+
+                // Step 3: Create default role-tiered channels now that group & member exist.
+                val defaultChannels = listOf(
+                    Triple("general", "General Lobby", ChannelAccessLevel.ALL.name to "Community announcements & participant Q&A"),
+                    Triple("organizers", "Event Organizers", ChannelAccessLevel.ORGANIZER.name to "Shift leads, logistics & task coordination"),
+                    Triple("admins", "Admin Command", ChannelAccessLevel.ADMIN.name to "Private admin coordination & permissions")
+                )
+                val channelBatch = db.batch()
+                defaultChannels.forEach { (idSuffix, title, levelPair) ->
+                    channelBatch.set(
+                        groupRef.collection("channels").document("ch_$idSuffix"),
+                        mapOf(
+                            "name" to title,
+                            "description" to levelPair.second,
+                            "accessLevel" to levelPair.first,
+                            "createdBy" to uid,
+                            "messageCount" to 0L,
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                }
+                channelBatch.commit().await()
+
+                // Step 4: Index in user's joinedGroups last so listeners only attach once everything is ready.
+                db.collection("users").document(uid).collection("joinedGroups").document(groupId)
+                    .set(
+                        mapOf(
+                            "groupId" to groupId,
+                            "groupName" to trimmedName,
+                            "groupCode" to normalizedCode,
+                            "role" to MemberRole.CREATOR.name,
+                            "joinedAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
+                    .await()
+            } catch (e: Exception) {
+                try {
+                    groupRef.delete().await()
+                } catch (_: Exception) {
+                }
+                throw e
             }
 
-            batch.commit().await()
             Result.success(groupId)
         } catch (e: CancellationException) {
             throw e
@@ -542,6 +560,9 @@ class RallyHubRepository(
                 ?: auth.currentUser?.email?.substringBefore("@")
                 ?: "Participant").take(60)
 
+            val joinedGroupRef = db.collection("users").document(uid).collection("joinedGroups").document(groupId)
+            val existingJoined = joinedGroupRef.get().await()
+
             val batch = db.batch()
             if (!existingMember.exists()) {
                 batch.set(
@@ -556,24 +577,77 @@ class RallyHubRepository(
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 )
-            }
-            batch.set(
-                db.collection("users").document(uid).collection("joinedGroups").document(groupId),
-                mapOf(
-                    "groupId" to groupId,
-                    "groupName" to groupName,
-                    "groupCode" to code,
-                    "role" to resolvedRole,
-                    "joinedAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
+            } else if (!displayNameOverride.isNullOrBlank() &&
+                displayName != existingMember.getString("displayName")
+            ) {
+                batch.update(
+                    memberRef,
+                    mapOf(
+                        "displayName" to displayName,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
                 )
-            )
+            }
+            if (existingJoined.exists()) {
+                batch.update(
+                    joinedGroupRef,
+                    mapOf(
+                        "groupName" to groupName,
+                        "groupCode" to code,
+                        "role" to resolvedRole,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            } else {
+                batch.set(
+                    joinedGroupRef,
+                    mapOf(
+                        "groupId" to groupId,
+                        "groupName" to groupName,
+                        "groupCode" to code,
+                        "role" to resolvedRole,
+                        "joinedAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
             batch.commit().await()
             Result.success(groupId)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, "groupCodes/$code")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun ensureCreatorMemberRecord(groupId: String): Result<Unit> {
+        val path = "groups/$groupId/members/${auth.currentUser?.uid}"
+        return try {
+            val uid = requireUserId()
+            val memberRef = db.collection("groups").document(groupId).collection("members").document(uid)
+            val snap = memberRef.get().await()
+            if (!snap.exists()) {
+                val displayName = (auth.currentUser?.displayName?.trim()?.takeIf { it.isNotBlank() }
+                    ?: auth.currentUser?.email?.substringBefore("@")?.trim()?.takeIf { it.isNotBlank() }
+                    ?: "Creator").take(60)
+                memberRef.set(
+                    mapOf(
+                        "uid" to uid,
+                        "displayName" to displayName,
+                        "role" to MemberRole.CREATOR.name,
+                        "tasksSignedUpCount" to 0L,
+                        "messagesSentCount" to 0L,
+                        "joinedAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
             Result.failure(e)
         }
     }

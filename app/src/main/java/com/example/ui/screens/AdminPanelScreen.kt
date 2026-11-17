@@ -368,7 +368,7 @@ private fun MemberPermissionRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = member.displayName,
+                        text = if (member.uid == viewerUid) "${member.displayName} (You)" else member.displayName,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )

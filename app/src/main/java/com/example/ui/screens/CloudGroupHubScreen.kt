@@ -54,6 +54,7 @@ fun CloudGroupHubScreen(
     modifier: Modifier = Modifier
 ) {
     var joinCode by remember { mutableStateOf("") }
+    var joinDisplayName by remember { mutableStateOf("") }
     var newGroupName by remember { mutableStateOf("") }
     var newGroupCode by remember { mutableStateOf("") }
     var newGroupDescription by remember { mutableStateOf("") }
@@ -131,8 +132,21 @@ fun CloudGroupHubScreen(
                                 .fillMaxWidth()
                                 .testTag("cloud_join_code_input")
                         )
+                        OutlinedTextField(
+                            value = joinDisplayName,
+                            onValueChange = { joinDisplayName = it.take(40) },
+                            label = { Text("Your Display Name (Optional)") },
+                            placeholder = { Text(uiState.currentUserName) },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("cloud_join_name_input")
+                        )
                         Button(
-                            onClick = { actions.joinGroupByCode(joinCode, uiState.currentUserName) },
+                            onClick = {
+                                val resolvedName = joinDisplayName.trim().ifBlank { uiState.currentUserName }
+                                actions.joinGroupByCode(joinCode, resolvedName)
+                            },
                             enabled = !uiState.isBusy && joinCode.trim().length >= 4,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -226,17 +240,30 @@ fun CloudGroupHubScreen(
                                 .fillMaxWidth()
                                 .testTag("create_group_desc_input")
                         )
+                        val normalizedPreviewCode = newGroupCode.trim().uppercase().replace(" ", "-")
+                        val isCodeValid = normalizedPreviewCode.matches(Regex("^[A-Z0-9_\\-]{4,24}$"))
+                        if (newGroupCode.isNotEmpty() && !isCodeValid) {
+                            Text(
+                                text = "Use 4–24 characters: A–Z, 0–9, - or _",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                         Button(
                             onClick = {
                                 actions.createGroupWithCode(newGroupName, newGroupDescription, newGroupCode)
                             },
-                            enabled = !uiState.isBusy && newGroupName.trim().length >= 2 && newGroupCode.trim().length >= 4,
+                            enabled = !uiState.isBusy && newGroupName.trim().length >= 2 && isCodeValid,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .testTag("create_group_button")
                         ) {
-                            Text("Create Group & Launch")
+                            if (uiState.isBusy) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("Create Group & Launch")
+                            }
                         }
                     }
                 }

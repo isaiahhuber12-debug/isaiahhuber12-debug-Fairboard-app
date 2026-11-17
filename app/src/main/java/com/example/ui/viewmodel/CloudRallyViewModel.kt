@@ -230,25 +230,63 @@ class CloudRallyViewModel(
         val banner = values[13] as String?
         val isBusy = values[14] as Boolean
 
-        val members = (membersUi as? UiState.Success)?.data.orEmpty()
+        val user = Firebase.auth.currentUser
+        val fallbackName = user?.displayName?.takeIf { it.isNotBlank() }
+            ?: user?.email?.substringBefore("@")
+            ?: "Member"
+
+        val rawMembers = (membersUi as? UiState.Success)?.data.orEmpty()
+        val normalizedMembers = if (activeGroup != null && membersUi is UiState.Success) {
+            val ownerId = activeGroup.ownerId
+            val mapped = rawMembers.map { member ->
+                if (ownerId.isNotBlank() && member.uid == ownerId && member.parsedRole() != MemberRole.CREATOR) {
+                    member.copy(role = MemberRole.CREATOR.name)
+                } else {
+                    member
+                }
+            }
+            val withOwner = if (ownerId.isNotBlank() && mapped.none { it.uid == ownerId }) {
+                if (ownerId == currentUserId) {
+                    ensureCreatorMemberPresent(activeGroup.id)
+                }
+                mapped + GroupMember(
+                    id = ownerId,
+                    uid = ownerId,
+                    displayName = if (ownerId == currentUserId) fallbackName else "Group Admin",
+                    role = MemberRole.CREATOR.name
+                )
+            } else {
+                mapped
+            }
+            withOwner.sortedWith(
+                compareByDescending<GroupMember> { it.parsedRole().rank }
+                    .thenBy { it.displayName.lowercase() }
+            )
+        } else {
+            rawMembers
+        }
+
+        val effectiveMembersUi = if (membersUi is UiState.Success) {
+            UiState.Success(normalizedMembers)
+        } else {
+            membersUi
+        }
+
+        val currentMember = normalizedMembers.firstOrNull { it.uid == currentUserId }
+        val displayName = currentMember?.displayName?.takeIf { it.isNotBlank() }
+            ?: fallbackName
+
         val events = (eventsUi as? UiState.Success)?.data.orEmpty()
         val channels = (channelsUi as? UiState.Success)?.data.orEmpty()
         val notifications = (notificationsUi as? UiState.Success)?.data.orEmpty()
         val allTasks = allTasksMap.values.flatten()
 
-        val user = Firebase.auth.currentUser
-        val currentMember = members.firstOrNull { it.uid == currentUserId }
-        val displayName = currentMember?.displayName?.takeIf { it.isNotBlank() }
-            ?: user?.displayName?.takeIf { it.isNotBlank() }
-            ?: user?.email?.substringBefore("@")
-            ?: "Member"
-
         val analytics = EngagementAnalytics(
-            totalMembers = members.size,
-            creatorCount = members.count { it.parsedRole() == MemberRole.CREATOR },
-            adminCount = members.count { it.parsedRole() == MemberRole.ADMIN },
-            organizerCount = members.count { it.parsedRole() == MemberRole.ORGANIZER },
-            participantCount = members.count { it.parsedRole() == MemberRole.PARTICIPANT },
+            totalMembers = normalizedMembers.size,
+            creatorCount = normalizedMembers.count { it.parsedRole() == MemberRole.CREATOR },
+            adminCount = normalizedMembers.count { it.parsedRole() == MemberRole.ADMIN },
+            organizerCount = normalizedMembers.count { it.parsedRole() == MemberRole.ORGANIZER },
+            participantCount = normalizedMembers.count { it.parsedRole() == MemberRole.PARTICIPANT },
             totalEvents = events.size,
             totalTasks = allTasks.size,
             totalTaskSlots = allTasks.sumOf { it.capacity.toInt() },
@@ -274,7 +312,7 @@ class CloudRallyViewModel(
             selectedChannelId = selectedChannelId,
             messagesState = messagesUi,
             notificationsState = notificationsUi,
-            membersState = membersUi,
+            membersState = effectiveMembersUi,
             analytics = analytics,
             remindedItemIds = remindedTimes.keys,
             remindedTimes = remindedTimes,
@@ -282,6 +320,15 @@ class CloudRallyViewModel(
             isBusy = isBusy
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), RallyWorkspaceUiState(isCloudMode = true, currentUserId = currentUserId))
+
+    private val ensuredCreatorGroups = mutableSetOf<String>()
+
+    private fun ensureCreatorMemberPresent(groupId: String) {
+        if (!ensuredCreatorGroups.add(groupId)) return
+        viewModelScope.launch {
+            repository.ensureCreatorMemberRecord(groupId)
+        }
+    }
 
     private fun dispatchLocalAlertsForNewNotifications(list: List<HubNotification>) {
         if (!notificationsInitialized) {

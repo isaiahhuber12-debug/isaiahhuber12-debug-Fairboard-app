@@ -25,7 +25,6 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.VerifiedUser
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -62,7 +61,9 @@ import com.example.ui.theme.CoralSecondary
 
 @Composable
 fun AuthAndJoinScreen(
-    onJoinWithGroupCode: (code: String, displayName: String) -> Unit,
+    onPrepareJoinWithCode: (code: String, displayName: String) -> Unit,
+    onPrepareStandardSignIn: () -> Unit,
+    onAuthCancelledOrFailed: () -> Unit,
     onGoogleAuthSuccess: () -> Unit,
     initialBanner: String? = null
 ) {
@@ -72,8 +73,11 @@ fun AuthAndJoinScreen(
 
     var groupCode by remember { mutableStateOf("") }
     var displayName by remember { mutableStateOf("") }
+    var isJoiningWithCode by remember { mutableStateOf(false) }
     var isGoogleSigningIn by remember { mutableStateOf(false) }
     var errorMessage by remember(initialBanner) { mutableStateOf(initialBanner) }
+
+    val anyBusy = isJoiningWithCode || isGoogleSigningIn
 
     Box(
         modifier = Modifier
@@ -158,7 +162,7 @@ fun AuthAndJoinScreen(
                     }
                 }
 
-                // Card 1: No-Account Participant Entry via Group Code
+                // Card 1: Join a Live Cloud Group via Group Code + Display Name
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
                     shape = MaterialTheme.shapes.large,
@@ -210,45 +214,59 @@ fun AuthAndJoinScreen(
                             value = displayName,
                             onValueChange = { displayName = it.take(40) },
                             label = { Text(stringResource(R.string.display_name_hint)) },
-                            placeholder = { Text("Optional (defaults to Participant)") },
+                            placeholder = { Text("Optional (defaults to your Google name)") },
                             singleLine = true,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("guest_name_input")
                         )
 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Quick code:",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            AssistChip(
-                                onClick = { groupCode = "SUMMIT26" },
-                                label = { Text("SUMMIT26") },
-                                modifier = Modifier.testTag("sample_code_chip")
-                            )
-                        }
-
                         Button(
                             onClick = {
-                                val normalized = groupCode.trim().uppercase()
+                                val normalized = groupCode.trim().uppercase().replace(" ", "-")
                                 if (!normalized.matches(Regex("^[A-Z0-9_\\-]{4,24}$"))) {
                                     errorMessage = "Enter a 4–24 character Group Code (letters, numbers, - or _)."
                                 } else {
                                     errorMessage = null
-                                    onJoinWithGroupCode(normalized, displayName)
+                                    isJoiningWithCode = true
+                                    onPrepareJoinWithCode(normalized, displayName.trim())
+                                    onGoogleSignInClicked(
+                                        context = context,
+                                        credentialManager = credentialManager,
+                                        onAuthSuccess = {
+                                            isJoiningWithCode = false
+                                            onGoogleAuthSuccess()
+                                        },
+                                        onAuthError = { msg ->
+                                            isJoiningWithCode = false
+                                            onAuthCancelledOrFailed()
+                                            errorMessage = msg
+                                        },
+                                        scope = scope,
+                                        onAuthCancelled = {
+                                            isJoiningWithCode = false
+                                            onAuthCancelledOrFailed()
+                                        }
+                                    )
                                 }
                             },
+                            enabled = !anyBusy,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(50.dp)
                                 .testTag("join_with_code_button")
                         ) {
-                            Text(stringResource(R.string.join_with_code_button))
+                            if (isJoiningWithCode) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text("Signing in to join...")
+                            } else {
+                                Text(stringResource(R.string.join_with_code_button))
+                            }
                         }
                     }
                 }
@@ -294,6 +312,7 @@ fun AuthAndJoinScreen(
                             onClick = {
                                 errorMessage = null
                                 isGoogleSigningIn = true
+                                onPrepareStandardSignIn()
                                 onGoogleSignInClicked(
                                     context = context,
                                     credentialManager = credentialManager,
@@ -303,15 +322,17 @@ fun AuthAndJoinScreen(
                                     },
                                     onAuthError = { msg ->
                                         isGoogleSigningIn = false
+                                        onAuthCancelledOrFailed()
                                         errorMessage = msg
                                     },
                                     scope = scope,
                                     onAuthCancelled = {
                                         isGoogleSigningIn = false
+                                        onAuthCancelledOrFailed()
                                     }
                                 )
                             },
-                            enabled = !isGoogleSigningIn,
+                            enabled = !anyBusy,
                             colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = MaterialTheme.colorScheme.primary
                             ),

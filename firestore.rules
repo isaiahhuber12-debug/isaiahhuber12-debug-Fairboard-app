@@ -64,6 +64,12 @@ service cloud.firestore {
              get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid;
     }
 
+    function isGroupCreatorAfter(groupId) {
+      return isSignedIn() &&
+             existsAfter(/databases/$(database)/documents/groups/$(groupId)) &&
+             getAfter(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid;
+    }
+
     function isGroupAdminOnly(groupId) {
       return isGroupMember(groupId) && memberRole(groupId) == 'ADMIN';
     }
@@ -290,11 +296,12 @@ service cloud.firestore {
       allow list: if false;
       allow create: if isSignedIn() && isValidCodeId(code) &&
                        isValidGroupCode(incoming()) &&
-                       incoming().createdBy == request.auth.uid &&
-                       existsAfter(/databases/$(database)/documents/groups/$(incoming().groupId)) && (
-                         getAfter(/databases/$(database)/documents/groups/$(incoming().groupId)).data.ownerId == request.auth.uid ||
+                       incoming().createdBy == request.auth.uid && (
+                         isGroupCreator(incoming().groupId) ||
                          isGroupAdminOrCreator(incoming().groupId) ||
-                         isGlobalAdmin()
+                         isGlobalAdmin() ||
+                         (existsAfter(/databases/$(database)/documents/groups/$(incoming().groupId)) &&
+                          getAfter(/databases/$(database)/documents/groups/$(incoming().groupId)).data.ownerId == request.auth.uid)
                        );
       allow update: if isSignedIn() && isValidCodeId(code) &&
                        isValidGroupCode(incoming()) &&
@@ -331,7 +338,8 @@ service cloud.firestore {
                          isValidMember(incoming()) &&
                          incoming().uid == memberId && (
                            (request.auth.uid == memberId && incoming().role == 'CREATOR' &&
-                            getAfter(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid) ||
+                            (isGroupCreator(groupId) ||
+                             getAfter(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid)) ||
                            (request.auth.uid == memberId && incoming().role == 'PARTICIPANT' &&
                             exists(/databases/$(database)/documents/groups/$(groupId))) ||
                            isGroupCreator(groupId) ||
@@ -429,7 +437,9 @@ service cloud.firestore {
         allow create: if isSignedIn() && isValidId(channelId) &&
                          isValidChannel(incoming()) &&
                          incoming().createdBy == request.auth.uid &&
-                         (isGlobalAdmin() || (isGroupOrganizerOrHigher(groupId) && canAccessChannel(groupId, incoming().accessLevel)));
+                         (isGlobalAdmin() ||
+                          (isGroupOrganizerOrHigher(groupId) && canAccessChannel(groupId, incoming().accessLevel)) ||
+                          isGroupCreatorAfter(groupId));
         allow update: if isSignedIn() && isValidId(channelId) &&
                          isValidChannel(incoming()) &&
                          incoming().createdBy == existing().createdBy &&
