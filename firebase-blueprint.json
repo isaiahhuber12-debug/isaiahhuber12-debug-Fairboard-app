@@ -1,0 +1,225 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Global platform administrator registry entry.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID of the global admin." },
+        "email": { "type": "string", "description": "Verified email address." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp via FieldValue.serverTimestamp()." }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user profile containing PII isolated to the owner.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID." },
+        "displayName": { "type": "string", "description": "Public display name." },
+        "email": { "type": "string", "description": "Private user email." },
+        "photoUrl": { "type": "string", "description": "Optional avatar URL." },
+        "activeGroupId": { "type": "string", "description": "Optional last active group ID." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
+      },
+      "required": ["uid", "displayName", "email", "createdAt", "updatedAt"]
+    },
+    "JoinedGroupRef": {
+      "title": "JoinedGroupRef",
+      "description": "User's personal index of joined RallyHub groups.",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string" },
+        "groupName": { "type": "string" },
+        "groupCode": { "type": "string" },
+        "role": { "type": "string", "enum": ["CREATOR", "ADMIN", "ORGANIZER", "PARTICIPANT"] },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["groupId", "groupName", "groupCode", "role", "joinedAt", "updatedAt"]
+    },
+    "GroupCodeEntry": {
+      "title": "GroupCodeEntry",
+      "description": "Invite code lookup entry mapping uppercase Group Code to groupId.",
+      "type": "object",
+      "properties": {
+        "groupId": { "type": "string" },
+        "groupName": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["groupId", "groupName", "createdBy", "active", "createdAt", "updatedAt"]
+    },
+    "RallyGroup": {
+      "title": "RallyGroup",
+      "description": "Top-level event community organization.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "groupCode": { "type": "string" },
+        "ownerId": { "type": "string", "description": "UID of the group creator with full control." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "description", "groupCode", "ownerId", "createdAt", "updatedAt"]
+    },
+    "GroupMember": {
+      "title": "GroupMember",
+      "description": "Group participant/organizer/admin/creator membership without PII.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["CREATOR", "ADMIN", "ORGANIZER", "PARTICIPANT"] },
+        "tasksSignedUpCount": { "type": "integer" },
+        "messagesSentCount": { "type": "integer" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "role", "tasksSignedUpCount", "messagesSentCount", "joinedAt", "updatedAt"]
+    },
+    "RallyEvent": {
+      "title": "RallyEvent",
+      "description": "Calendar event within a group.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "location": { "type": "string" },
+        "category": { "type": "string" },
+        "startEpochMs": { "type": "integer" },
+        "endEpochMs": { "type": "integer" },
+        "createdBy": { "type": "string" },
+        "organizerName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "description", "location", "category", "startEpochMs", "endEpochMs", "createdBy", "organizerName", "createdAt", "updatedAt"]
+    },
+    "EventTask": {
+      "title": "EventTask",
+      "description": "Volunteer/participant task shift attached to a calendar event.",
+      "type": "object",
+      "properties": {
+        "eventId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "deadlineEpochMs": { "type": "integer" },
+        "capacity": { "type": "integer" },
+        "assignedCount": { "type": "integer" },
+        "assignedUids": { "type": "array" },
+        "assignedNames": { "type": "array" },
+        "status": { "type": "string", "enum": ["OPEN", "FILLED", "COMPLETED"] },
+        "chatChannelId": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["eventId", "title", "description", "deadlineEpochMs", "capacity", "assignedCount", "assignedUids", "assignedNames", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "ChatChannel": {
+      "title": "ChatChannel",
+      "description": "Role-gated group chat channel.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "accessLevel": { "type": "string", "enum": ["ALL", "ORGANIZER", "ADMIN"] },
+        "eventId": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "messageCount": { "type": "integer" },
+        "lastMessagePreview": { "type": "string" },
+        "lastMessageAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "description", "accessLevel", "createdBy", "messageCount", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Real-time text message inside a channel.",
+      "type": "object",
+      "properties": {
+        "channelId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderRole": { "type": "string", "enum": ["CREATOR", "ADMIN", "ORGANIZER", "PARTICIPANT"] },
+        "text": { "type": "string" },
+        "messageType": { "type": "string", "enum": ["TEXT", "ANNOUNCEMENT", "TASK_UPDATE"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["channelId", "senderId", "senderName", "senderRole", "text", "messageType", "createdAt"]
+    },
+    "HubNotification": {
+      "title": "HubNotification",
+      "description": "Targeted notification for announcements, task updates, and deadline reminders.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "notificationType": { "type": "string", "enum": ["ANNOUNCEMENT", "TASK_UPDATE", "DEADLINE_REMINDER"] },
+        "targetScope": { "type": "string", "enum": ["ALL", "ROLE", "CHANNEL"] },
+        "targetRole": { "type": "string", "enum": ["ALL", "PARTICIPANT", "ORGANIZER", "ADMIN"] },
+        "targetChannelId": { "type": "string" },
+        "targetChannelName": { "type": "string" },
+        "targetEventId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "scheduledForEpochMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "body", "notificationType", "targetScope", "targetRole", "senderId", "senderName", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Global platform admins."
+    },
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile isolated to owner."
+    },
+    "/users/{uid}/joinedGroups/{groupId}": {
+      "schema": { "$ref": "#/entities/JoinedGroupRef" },
+      "description": "User's joined group references."
+    },
+    "/groupCodes/{code}": {
+      "schema": { "$ref": "#/entities/GroupCodeEntry" },
+      "description": "Invite code to groupId lookup."
+    },
+    "/groups/{groupId}": {
+      "schema": { "$ref": "#/entities/RallyGroup" },
+      "description": "RallyHub group metadata."
+    },
+    "/groups/{groupId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/GroupMember" },
+      "description": "Group member roles and engagement counters."
+    },
+    "/groups/{groupId}/events/{eventId}": {
+      "schema": { "$ref": "#/entities/RallyEvent" },
+      "description": "Calendar events for a group."
+    },
+    "/groups/{groupId}/events/{eventId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/EventTask" },
+      "description": "Volunteer tasks for an event."
+    },
+    "/groups/{groupId}/channels/{channelId}": {
+      "schema": { "$ref": "#/entities/ChatChannel" },
+      "description": "Role-scoped group chat channels."
+    },
+    "/groups/{groupId}/channels/{channelId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages inside a chat channel."
+    },
+    "/groups/{groupId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/HubNotification" },
+      "description": "Targeted push alerts and announcements."
+    }
+  }
+}

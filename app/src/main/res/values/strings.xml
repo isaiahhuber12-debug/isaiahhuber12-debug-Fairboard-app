@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">RallyHub</string>
+    <string name="nav_dashboard">Dashboard</string>
+    <string name="nav_calendar">Calendar</string>
+    <string name="nav_chats">Chats</string>
+    <string name="nav_alerts">Alerts</string>
+    <string name="nav_admin">Admin</string>
+    <string name="join_group_title">Join an Event Group</string>
+    <string name="join_group_subtitle">Enter a group code from your organizer — no account required.</string>
+    <string name="admin_sign_in_title">Admin &amp; Organizer Sign-In</string>
+    <string name="admin_sign_in_subtitle">Sign in with Google to create group codes, manage permissions, and sync live across devices.</string>
+    <string name="sign_in_with_google">Sign in with Google</string>
+    <string name="join_with_code_button">Join with Group Code</string>
+    <string name="group_code_hint">Group Code (e.g. SUMMIT26)</string>
+    <string name="display_name_hint">Your Display Name</string>
+    <string name="notif_channel_announcements">Event Announcements</string>
+    <string name="notif_channel_tasks">Task &amp; Group Updates</string>
+    <string name="notif_channel_reminders">Deadlines &amp; Event Reminders</string>
+</resources>

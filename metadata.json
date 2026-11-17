@@ -1,0 +1,6 @@
+{
+  "name": "RallyHub",
+  "description": "Event calendar, task signups, role-based group chats, real-time alerts, and admin analytics for large communities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
