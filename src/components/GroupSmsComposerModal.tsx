@@ -232,7 +232,7 @@ function GroupSmsComposerModalBody({
       
     } finally {
       setSendingCloudSms(false);
-    }}
+    }
   };
   const canLaunchDeviceSms = allRecipientPhones.length > 0;
   const smsSegments = Math.max(1, Math.ceil((formattedSmsText.length || 1) / 160));
