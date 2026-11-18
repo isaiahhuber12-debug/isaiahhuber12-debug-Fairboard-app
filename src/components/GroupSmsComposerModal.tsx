@@ -206,7 +206,7 @@ function GroupSmsComposerModalBody({
 
     setSendingCloudSms(true);
     try {
-      const response = await fetch('https://textbee.dev', {
+      const response = await fetch('https://api.textbee.dev/api/v1/gateway/send-sms, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
