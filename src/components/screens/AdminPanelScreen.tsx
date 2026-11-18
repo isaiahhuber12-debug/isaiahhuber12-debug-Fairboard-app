@@ -162,7 +162,9 @@ export function AdminPanelScreen({
       setNewChannelDesc('');
     }
   };
-
+if (state.currentRole === 'participant' || state.currentRole === 'member') {
+  return null;
+}
   return (
     <div className="mx-auto w-full max-w-[860px] space-y-4 px-4 py-5 sm:px-6">
       {/* Header */}
