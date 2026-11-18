@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  base: '/isaiahhuber12-debug-Fairboard-app/',
   plugins: [
     react(),
     tailwindcss(),
