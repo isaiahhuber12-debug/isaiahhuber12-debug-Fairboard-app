@@ -1,11 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Check,
   ChevronDown,
+  Copy,
   Download,
   FileSpreadsheet,
   Lock,
+  Mail,
   Megaphone,
   MessageSquare,
+  MessageSquareShare,
+  Phone,
   Plus,
   Search,
   ShieldAlert,
@@ -16,12 +21,14 @@ import {
   X,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
+import { formatPhoneDisplay } from '../../services/smsService';
 import {
   ActivityAction,
   CHANNEL_ACCESS_LABELS,
   ChannelAccessLevel,
   type ChatChannel,
   type GroupMember,
+  type MemberContactInfo,
   MemberRole,
   parseActivityAction,
   parseChannelAccessLevel,
@@ -41,8 +48,10 @@ import {
 } from '../RallyComponents';
 import { ActivityLog } from '../ActivityLog';
 import { AdminAuditLog, isSensitiveAuditAction } from '../AdminAuditLog';
-import { BackgroundCustomizerCard } from '../BackgroundCustomizerCard';
+import { PersonalAppearanceCard } from '../BackgroundCustomizerCard';
 import { GroupImageEditor } from '../GroupImageEditor';
+import { GroupSmsComposerModal } from '../GroupSmsComposerModal';
+import { QrInviteShareButton } from '../QrInviteShareModal';
 
 export type AdminPanelSubTab = 'controls' | 'audit';
 
@@ -81,6 +90,8 @@ export function AdminPanelScreen({
   const [roleFilter, setRoleFilter] = useState<MemberRole | null>(null);
   const [visibleMemberLimit, setVisibleMemberLimit] = useState(50);
   const [showBroadcastDialog, setShowBroadcastDialog] = useState(false);
+  const [showSmsComposer, setShowSmsComposer] = useState(false);
+  const [smsTargetPhones, setSmsTargetPhones] = useState<string[] | undefined>(undefined);
   const [showDeleteGroupDialog, setShowDeleteGroupDialog] = useState(false);
   const [deletingChannel, setDeletingChannel] = useState<ChatChannel | null>(null);
   const [deletingMember, setDeletingMember] = useState<GroupMember | null>(null);
@@ -88,6 +99,12 @@ export function AdminPanelScreen({
   const [newChannelDesc, setNewChannelDesc] = useState('');
   const [newChannelAccess, setNewChannelAccess] = useState<ChannelAccessLevel>(
     ChannelAccessLevel.ALL
+  );
+
+  const membersWithPhoneCount = useMemo(
+    () =>
+      members.filter((m) => Boolean(state.memberContactsByUid[m.uid]?.phoneNumber)).length,
+    [members, state.memberContactsByUid]
   );
 
   const sensitiveAuditCount = useMemo(() => {
@@ -114,18 +131,26 @@ export function AdminPanelScreen({
 
   const filteredMembers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const qDigits = q.replace(/\D/g, '');
     return members.filter((m) => {
       const memberRole = parseMemberRole(m.role);
       const roleLabel = ROLE_META[memberRole].label.toLowerCase();
+      const contact = state.memberContactsByUid[m.uid];
+      const phoneStr = (contact?.phoneNumber ?? '').toLowerCase();
+      const phoneDigits = phoneStr.replace(/\D/g, '');
+      const emailStr = (contact?.email ?? '').toLowerCase();
       const matchesQuery =
         !q ||
         m.displayName.toLowerCase().includes(q) ||
         roleLabel.includes(q) ||
-        memberRole.toLowerCase().includes(q);
+        memberRole.toLowerCase().includes(q) ||
+        phoneStr.includes(q) ||
+        (qDigits.length >= 3 && phoneDigits.includes(qDigits)) ||
+        emailStr.includes(q);
       const matchesRole = roleFilter === null || memberRole === roleFilter;
       return matchesQuery && matchesRole;
     });
-  }, [members, searchQuery, roleFilter]);
+  }, [members, searchQuery, roleFilter, state.memberContactsByUid]);
 
   const handleCreateQuickChannel = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,8 +172,8 @@ export function AdminPanelScreen({
           </h1>
           <p className="text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
             {isCreator
-              ? 'Group Creator: Full control over admins, group settings, backgrounds, and messaging channels.'
-              : 'Admin: Can edit group details & codes, customize backgrounds, manage messaging channels, create admins, and approve/delete posts.'}
+              ? 'Group Creator: Full control over admins, group settings, member contacts, and messaging channels.'
+              : 'Admin: Can edit group details & codes, manage messaging channels, create admins, and approve/delete posts.'}
           </p>
         </div>
         <RoleBadge role={state.currentRole} />
@@ -230,18 +255,13 @@ export function AdminPanelScreen({
         />
       )}
 
-      {/* Background & Appearance Customizer */}
-      {group && (
-        <BackgroundCustomizerCard
-          activeGroup={group}
-          joinedGroups={state.joinedGroups}
-          appBackground={state.appBackground}
-          groupBackgroundsById={state.groupBackgroundsById}
-          isBusy={state.isBusy}
-          onUpdateAppBackground={(spec) => void actions.updateAppBackground(spec)}
-          onUpdateGroupBackground={(gid, spec) => void actions.updateGroupBackground(gid, spec)}
-        />
-      )}
+      {/* Personal Colors & Background Customizer (Isolated to Current User) */}
+      <PersonalAppearanceCard
+        appearance={state.personalAppearance}
+        isBusy={state.isBusy}
+        onUpdate={(patch) => void actions.updatePersonalAppearance(patch)}
+        onReset={() => void actions.resetPersonalAppearance()}
+      />
 
       {/* Messaging Channels Manager (Create & Delete Messaging Groups) */}
       <section
@@ -349,16 +369,34 @@ export function AdminPanelScreen({
         )}
       </section>
 
-      {/* Broadcast Quick Action */}
-      <button
-        type="button"
-        onClick={() => setShowBroadcastDialog(true)}
-        data-testid="admin_broadcast_button"
-        className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[var(--rally-primary)] px-4 text-sm font-semibold text-white shadow-sm transition hover:brightness-110"
-      >
-        <Megaphone className="h-4 w-4" />
-        <span>Send Broadcast / Targeted Notification</span>
-      </button>
+      {/* Broadcast & Outbound SMS Quick Actions */}
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => setShowBroadcastDialog(true)}
+          data-testid="admin_broadcast_button"
+          className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[var(--rally-primary)] px-4 text-sm font-semibold text-white shadow-sm transition hover:brightness-110"
+        >
+          <Megaphone className="h-4 w-4" />
+          <span>Send In-App Broadcast</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setSmsTargetPhones(undefined);
+            setShowSmsComposer(true);
+          }}
+          data-testid="admin_send_sms_button"
+          className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[var(--rally-secondary)] px-4 text-sm font-semibold text-white shadow-sm transition hover:brightness-110"
+        >
+          <MessageSquareShare className="h-4 w-4" />
+          <span>
+            Send SMS to Phone Numbers
+            {membersWithPhoneCount > 0 ? ` (${membersWithPhoneCount})` : ''}
+          </span>
+        </button>
+      </div>
 
       {/* Engagement Analytics */}
       <div className="space-y-4 rounded-3xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-5">
@@ -463,12 +501,18 @@ export function AdminPanelScreen({
         currentUserId={state.currentUserId}
       />
 
-      {/* Member Permissions */}
+      {/* Member Directory, Contact Info & Permissions */}
       <div className="space-y-3 pt-1">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-display text-lg font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
-            Member Permissions ({members.length} / 500)
-          </h2>
+          <div>
+            <h2 className="font-display text-lg font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
+              Member Directory &amp; Contacts ({members.length} / 500)
+            </h2>
+            <p className="text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
+              Creator &amp; Admin view: member names, cell phone numbers, sign-in method, and role
+              permissions.
+            </p>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             {(searchQuery.trim() || roleFilter !== null) && (
               <span
@@ -478,6 +522,18 @@ export function AdminPanelScreen({
                 Showing {filteredMembers.length} of {members.length}
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => {
+                setSmsTargetPhones(undefined);
+                setShowSmsComposer(true);
+              }}
+              data-testid="member_roster_send_sms_button"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-primary-container)] px-3 py-1.5 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95"
+            >
+              <MessageSquareShare className="h-3.5 w-3.5" />
+              <span>Text Members ({membersWithPhoneCount})</span>
+            </button>
             <button
               type="button"
               disabled={state.isBusy || members.length === 0}
@@ -508,8 +564,8 @@ export function AdminPanelScreen({
               setSearchQuery(e.target.value);
               setVisibleMemberLimit(50);
             }}
-            placeholder="Search members by name or role (e.g. Organizer, Admin)..."
-            aria-label="Filter group members by name or role"
+            placeholder="Search members by name, phone number, email, or role..."
+            aria-label="Filter group members by name, phone number, email, or role"
             data-testid="member_search_input"
             className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-2.5 pl-10 pr-10 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
           />
@@ -595,11 +651,17 @@ export function AdminPanelScreen({
               <MemberPermissionRow
                 key={member.uid}
                 member={member}
+                contact={state.memberContactsByUid[member.uid]}
                 viewerIsCreator={isCreator}
                 viewerUid={state.currentUserId}
                 isBusy={state.isBusy}
                 onAssignRole={(newRole) => void actions.updateMemberRole(member.uid, newRole)}
                 onRemoveMember={() => setDeletingMember(member)}
+                onTextMember={(phone) => {
+                  setSmsTargetPhones([phone]);
+                  setShowSmsComposer(true);
+                }}
+                onCopiedPhone={() => actions.showBanner('Member phone number copied')}
               />
             ))}
           </div>
@@ -633,6 +695,26 @@ export function AdminPanelScreen({
           setShowBroadcastDialog(false);
         }}
         onSendAndAnother={(params) => actions.sendNotification(params)}
+      />
+
+      {/* Outbound SMS Composer Modal */}
+      <GroupSmsComposerModal
+        open={showSmsComposer}
+        onClose={() => {
+          setShowSmsComposer(false);
+          setSmsTargetPhones(undefined);
+        }}
+        groupName={group?.name ?? null}
+        members={members}
+        memberContactsByUid={state.memberContactsByUid}
+        initialRecipientPhones={smsTargetPhones}
+        serverConfigured={state.smsServerConfigured}
+        serverStatus={state.smsServerStatus}
+        onRefreshServerStatus={actions.refreshSmsServerStatus}
+        isGuest={state.isGuest}
+        isBusy={state.isBusy}
+        onSendCloudSms={actions.sendDirectSmsBroadcast}
+        onBanner={actions.showBanner}
       />
 
       {/* Delete Group (Creator Only) */}
@@ -724,98 +806,193 @@ export function AdminPanelScreen({
 
 function MemberPermissionRow({
   member,
+  contact,
   viewerIsCreator,
   viewerUid,
   isBusy,
   onAssignRole,
   onRemoveMember,
+  onTextMember,
+  onCopiedPhone,
 }: {
   member: GroupMember;
+  contact?: MemberContactInfo;
   viewerIsCreator: boolean;
   viewerUid: string;
   isBusy: boolean;
   onAssignRole: (role: MemberRole) => void;
   onRemoveMember: () => void;
+  onTextMember: (phone: string) => void;
+  onCopiedPhone: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [copiedPhone, setCopiedPhone] = useState(false);
   const memberRole = parseMemberRole(member.role);
+  const isGuestMember =
+    contact?.authMethod === 'CODE_GUEST' || member.uid.startsWith('guest_');
 
-  const canEdit =
+  const canEditRole =
+    !isGuestMember &&
     memberRole !== MemberRole.CREATOR &&
     member.uid !== viewerUid &&
     (viewerIsCreator || memberRole !== MemberRole.ADMIN);
 
+  const canRemove =
+    memberRole !== MemberRole.CREATOR &&
+    member.uid !== viewerUid &&
+    (viewerIsCreator || memberRole !== MemberRole.ADMIN);
+
+  const handleCopyPhone = async () => {
+    if (!contact?.phoneNumber || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(contact.phoneNumber);
+      setCopiedPhone(true);
+      onCopiedPhone();
+      window.setTimeout(() => setCopiedPhone(false), 1800);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
+
   return (
-    <div className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-3.5">
-      <div className="min-w-0 flex-1">
+    <div
+      data-testid={`admin_member_row_${member.uid}`}
+      className="flex flex-col justify-between gap-3 rounded-2xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-3.5 sm:flex-row sm:items-center"
+    >
+      <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-display text-sm font-bold">
             {member.uid === viewerUid ? `${member.displayName} (You)` : member.displayName}
           </span>
           <RoleBadge role={memberRole} />
+          <span
+            className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${
+              isGuestMember
+                ? 'bg-[var(--rally-tertiary-container)] text-[var(--rally-on-tertiary-container)]'
+                : 'bg-[var(--rally-surface-variant)] text-[var(--rally-on-surface-variant)]'
+            }`}
+          >
+            {isGuestMember ? 'Group Code Join' : 'Google Account'}
+          </span>
         </div>
-        <div className="mt-1 text-xs text-[var(--rally-on-surface-variant)]">
+
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          {contact?.phoneNumber ? (
+            <div className="inline-flex items-center gap-1.5 font-mono-code font-semibold text-[var(--rally-on-surface)]">
+              <Phone className="h-3.5 w-3.5 text-[var(--rally-primary)]" />
+              <a
+                href={`tel:${contact.phoneNumber}`}
+                data-testid={`member_phone_${member.uid}`}
+                className="hover:underline"
+              >
+                {formatPhoneDisplay(contact.phoneNumber)}
+              </a>
+              <button
+                type="button"
+                onClick={() => void handleCopyPhone()}
+                title="Copy phone number"
+                className="rounded p-0.5 text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)] hover:text-[var(--rally-on-surface)]"
+              >
+                {copiedPhone ? (
+                  <Check className="h-3 w-3 text-[var(--rally-tertiary)]" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
+              </button>
+            </div>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-[var(--rally-on-surface-variant)]">
+              <Phone className="h-3.5 w-3.5 opacity-60" />
+              <span>No cell phone on file yet</span>
+            </span>
+          )}
+
+          {contact?.email && (
+            <span className="inline-flex items-center gap-1 text-[var(--rally-on-surface-variant)]">
+              <Mail className="h-3.5 w-3.5 opacity-75" />
+              <span className="truncate">{contact.email}</span>
+            </span>
+          )}
+        </div>
+
+        <div className="text-[11px] text-[var(--rally-on-surface-variant)]">
           {member.tasksSignedUpCount} tasks • {member.messagesSentCount} messages
         </div>
       </div>
 
-      <div className="relative flex shrink-0 items-center gap-1.5">
-        {canEdit ? (
-          <>
-            <button
-              type="button"
-              disabled={isBusy}
-              onClick={() => setMenuOpen((o) => !o)}
-              data-testid={`manage_role_${member.uid}`}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
-            >
-              <UserCog className="h-4 w-4" />
-              <span>Role</span>
-              <ChevronDown className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              disabled={isBusy}
-              onClick={() => {
-                setMenuOpen(false);
-                onRemoveMember();
-              }}
-              data-testid={`remove_member_${member.uid}`}
-              title={`Remove ${member.displayName} from group`}
-              className="inline-flex items-center gap-1 rounded-xl border border-[var(--rally-error)]/35 px-2.5 py-1.5 text-xs font-semibold text-[var(--rally-error)] transition hover:bg-[var(--rally-error)]/10 disabled:opacity-45"
-            >
-              <UserMinus className="h-3.5 w-3.5" />
-              <span>Remove</span>
-            </button>
-            {menuOpen && (
-              <div className="absolute right-0 top-full z-20 mt-1 w-48 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-1 shadow-lg">
-                {[MemberRole.PARTICIPANT, MemberRole.ORGANIZER, MemberRole.ADMIN].map(
-                  (targetRole) => (
-                    <button
-                      key={targetRole}
-                      type="button"
-                      onClick={() => {
-                        setMenuOpen(false);
-                        if (targetRole !== memberRole) onAssignRole(targetRole);
-                      }}
-                      className="block w-full px-3.5 py-2 text-left text-xs font-medium hover:bg-[var(--rally-surface-variant)]"
-                    >
-                      {targetRole === memberRole
-                        ? `${ROLE_META[targetRole].label} (Current)`
-                        : `Set as ${ROLE_META[targetRole].label}`}
-                    </button>
-                  )
-                )}
-              </div>
-            )}
-          </>
-        ) : memberRole === MemberRole.CREATOR ? (
+      <div className="relative flex shrink-0 flex-wrap items-center gap-1.5">
+        {contact?.phoneNumber && (
+          <button
+            type="button"
+            onClick={() => onTextMember(contact.phoneNumber)}
+            data-testid={`text_member_${member.uid}`}
+            title={`Send SMS to ${member.displayName}`}
+            className="inline-flex items-center gap-1 rounded-xl bg-[var(--rally-primary-container)] px-2.5 py-1.5 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95"
+          >
+            <MessageSquareShare className="h-3.5 w-3.5" />
+            <span>Text</span>
+          </button>
+        )}
+
+        {canEditRole && (
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={() => setMenuOpen((o) => !o)}
+            data-testid={`manage_role_${member.uid}`}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
+          >
+            <UserCog className="h-4 w-4" />
+            <span>Role</span>
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+        )}
+
+        {canRemove && (
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={() => {
+              setMenuOpen(false);
+              onRemoveMember();
+            }}
+            data-testid={`remove_member_${member.uid}`}
+            title={`Remove ${member.displayName} from group`}
+            className="inline-flex items-center gap-1 rounded-xl border border-[var(--rally-error)]/35 px-2.5 py-1.5 text-xs font-semibold text-[var(--rally-error)] transition hover:bg-[var(--rally-error)]/10 disabled:opacity-45"
+          >
+            <UserMinus className="h-3.5 w-3.5" />
+            <span>Remove</span>
+          </button>
+        )}
+
+        {menuOpen && canEditRole && (
+          <div className="absolute right-0 top-full z-20 mt-1 w-48 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-1 shadow-lg">
+            {[MemberRole.PARTICIPANT, MemberRole.ORGANIZER, MemberRole.ADMIN].map((targetRole) => (
+              <button
+                key={targetRole}
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  if (targetRole !== memberRole) onAssignRole(targetRole);
+                }}
+                className="block w-full px-3.5 py-2 text-left text-xs font-medium hover:bg-[var(--rally-surface-variant)]"
+              >
+                {targetRole === memberRole
+                  ? `${ROLE_META[targetRole].label} (Current)`
+                  : `Set as ${ROLE_META[targetRole].label}`}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {memberRole === MemberRole.CREATOR && (
           <span className="text-xs font-bold text-[var(--rally-secondary)]">Owner</span>
-        ) : memberRole === MemberRole.ADMIN && !viewerIsCreator ? (
+        )}
+        {memberRole === MemberRole.ADMIN && !viewerIsCreator && member.uid !== viewerUid && (
           <span className="text-xs font-medium text-[var(--rally-on-surface-variant)]">
             Creator Lock
           </span>
-        ) : null}
+        )}
       </div>
     </div>
   );
@@ -860,7 +1037,10 @@ function GroupSettingsCard({
             Update community identity or rotate the join code.
           </p>
         </div>
-        <GroupCodePill code={group.groupCode} onCopied={onCopiedCode} />
+        <div className="flex flex-wrap items-center gap-2">
+          <GroupCodePill code={group.groupCode} onCopied={onCopiedCode} />
+          <QrInviteShareButton groupCode={group.groupCode} groupName={group.name} />
+        </div>
       </div>
 
       {/* Group Profile Image */}

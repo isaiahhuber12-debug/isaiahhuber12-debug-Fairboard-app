@@ -24,8 +24,16 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isGuestId(id) {
+      return id is string && id.size() >= 22 && id.size() <= 46 && id.matches('^guest_[a-zA-Z0-9]+$');
+    }
+
     function isValidCodeId(code) {
       return code is string && code.size() >= 4 && code.size() <= 24 && code.matches('^[A-Z0-9_\\-]+$');
+    }
+
+    function isValidPhone(phone) {
+      return phone is string && phone.size() >= 8 && phone.size() <= 20 && phone.matches('^\\+[1-9][0-9]{7,14}$');
     }
 
     function isValidTimestamp(ts) {
@@ -47,6 +55,10 @@ service cloud.firestore {
     }
 
     // --- Group Membership & RBAC Helpers ---
+    function groupDocExists(groupId) {
+      return exists(/databases/$(database)/documents/groups/$(groupId));
+    }
+
     function memberPath(groupId, uid) {
       return /databases/$(database)/documents/groups/$(groupId)/members/$(uid);
     }
@@ -61,7 +73,7 @@ service cloud.firestore {
 
     function isGroupCreator(groupId) {
       return isSignedIn() &&
-             exists(/databases/$(database)/documents/groups/$(groupId)) &&
+             groupDocExists(groupId) &&
              get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid;
     }
 
@@ -99,6 +111,11 @@ service cloud.firestore {
              );
     }
 
+    function isPublicGroupChannel(groupId, channelId) {
+      return exists(/databases/$(database)/documents/groups/$(groupId)/channels/$(channelId)) &&
+             get(/databases/$(database)/documents/groups/$(groupId)/channels/$(channelId)).data.accessLevel == 'ALL';
+    }
+
     function canAccessNotification(groupId, targetRole) {
       return targetRole == 'ALL' ||
              targetRole == 'PARTICIPANT' ||
@@ -115,27 +132,57 @@ service cloud.firestore {
              isValidTimestamp(data.createdAt);
     }
 
-    function isValidUserProfile(data) {
-      return data.keys().hasAll(['uid', 'displayName', 'email', 'createdAt', 'updatedAt']) &&
-             data.keys().hasOnly(['uid', 'displayName', 'email', 'photoUrl', 'activeGroupId', 'smsPhone', 'smsEnabled', 'smsForMessages', 'smsForEvents', 'createdAt', 'updatedAt']) &&
-             isValidId(data.uid) &&
-             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
-             data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
-             (!('photoUrl' in data) || data.photoUrl == null || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
-             (!('activeGroupId' in data) || data.activeGroupId == null || isValidId(data.activeGroupId)) &&
-             (!('smsPhone' in data) || data.smsPhone == null || (data.smsPhone is string && data.smsPhone.size() <= 20 && data.smsPhone.matches('^\\+[1-9][0-9]{7,14}$'))) &&
-             (!('smsEnabled' in data) || data.smsEnabled is bool) &&
-             (!('smsForMessages' in data) || data.smsForMessages is bool) &&
-             (!('smsForEvents' in data) || data.smsForEvents is bool) &&
-             isValidTimestamp(data.createdAt) &&
-             isValidTimestamp(data.updatedAt);
+    function isValidColorTheme(val) {
+      return val is string &&
+             val.size() >= 1 &&
+             val.size() <= 24 &&
+             val.matches('^(default|emerald|violet|coral|ocean|rose|amber|indigo|custom:#[0-9A-Fa-f]{6}|dual:#[0-9A-Fa-f]{6}:#[0-9A-Fa-f]{6})$');
+    }
+
+    function isValidColorMode(val) {
+      return val is string &&
+             val.size() >= 4 &&
+             val.size() <= 10 &&
+             val in ['system', 'light', 'dark'];
     }
 
     function isValidBackgroundSpec(bg) {
       return bg is string &&
              bg.size() >= 1 &&
              bg.size() <= 40 &&
-             bg.matches('^(default|ocean-mist|emerald-grove|sunset-warmth|lavender-studio|dot-grid|diagonal-weave|emerald|sunset|midnight|royal|teal-ocean|solid:#[0-9A-Fa-f]{6}|gradient:#[0-9A-Fa-f]{6}:#[0-9A-Fa-f]{6})$');
+             bg.matches('^(theme|default|ocean-mist|emerald-grove|sunset-warmth|lavender-studio|midnight-canvas|dot-grid|diagonal-weave|emerald|sunset|midnight|royal|teal-ocean|solid:#[0-9A-Fa-f]{6}|gradient:#[0-9A-Fa-f]{6}:#[0-9A-Fa-f]{6})$');
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'displayName', 'email', 'photoUrl', 'activeGroupId', 'smsPhone', 'smsEnabled', 'smsForMessages', 'smsForEvents', 'personalColorTheme', 'personalColorMode', 'personalBackground', 'personalBannerBackground', 'createdAt', 'updatedAt']) &&
+             isValidId(data.uid) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+             (!('photoUrl' in data) || data.photoUrl == null || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
+             (!('activeGroupId' in data) || data.activeGroupId == null || isValidId(data.activeGroupId)) &&
+             (!('smsPhone' in data) || data.smsPhone == null || isValidPhone(data.smsPhone)) &&
+             (!('smsEnabled' in data) || data.smsEnabled is bool) &&
+             (!('smsForMessages' in data) || data.smsForMessages is bool) &&
+             (!('smsForEvents' in data) || data.smsForEvents is bool) &&
+             (!('personalColorTheme' in data) || data.personalColorTheme == null || isValidColorTheme(data.personalColorTheme)) &&
+             (!('personalColorMode' in data) || data.personalColorMode == null || isValidColorMode(data.personalColorMode)) &&
+             (!('personalBackground' in data) || data.personalBackground == null || isValidBackgroundSpec(data.personalBackground)) &&
+             (!('personalBannerBackground' in data) || data.personalBannerBackground == null || isValidBackgroundSpec(data.personalBannerBackground)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidMemberContact(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'phoneNumber', 'authMethod', 'smsEnabled', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'displayName', 'phoneNumber', 'email', 'authMethod', 'smsEnabled', 'updatedAt']) &&
+             isValidId(data.uid) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             isValidPhone(data.phoneNumber) &&
+             (!('email' in data) || data.email == null || (data.email is string && data.email.size() >= 3 && data.email.size() <= 160)) &&
+             data.authMethod in ['GOOGLE', 'CODE_GUEST'] &&
+             data.smsEnabled is bool &&
+             isValidTimestamp(data.updatedAt);
     }
 
     function isValidGroupImageUrl(url) {
@@ -146,17 +193,6 @@ service cloud.firestore {
                (url.size() <= 1000 && url.matches('^https://[^\\s]+$')) ||
                url.matches('^data:image/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$')
              );
-    }
-
-    function isValidAppAppearance(data) {
-      return data.keys().hasAll(['appBackground', 'sourceGroupId', 'updatedBy', 'updatedByName', 'updatedAt']) &&
-             data.keys().hasOnly(['appBackground', 'sourceGroupId', 'updatedBy', 'updatedByName', 'updatedAt']) &&
-             isValidBackgroundSpec(data.appBackground) &&
-             isValidId(data.sourceGroupId) &&
-             isValidId(data.updatedBy) &&
-             data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 60 &&
-             isValidTimestamp(data.updatedAt) &&
-             data.updatedAt == request.time;
     }
 
     function isValidJoinedGroupRef(data) {
@@ -323,13 +359,9 @@ service cloud.firestore {
     }
 
     match /appSettings/{settingId} {
-      allow get: if isSignedIn() && settingId == 'appearance';
+      allow get: if settingId == 'appearance';
       allow list: if false;
-      allow create, update: if isSignedIn() &&
-                               settingId == 'appearance' &&
-                               isValidAppAppearance(incoming()) &&
-                               incoming().updatedBy == request.auth.uid &&
-                               (isGlobalAdmin() || isGroupAdminOrCreator(incoming().sourceGroupId));
+      allow create, update: if false;
       allow delete: if isGlobalAdmin();
     }
 
@@ -343,7 +375,7 @@ service cloud.firestore {
                        isValidUserProfile(incoming()) &&
                        incoming().uid == existing().uid &&
                        incoming().createdAt == existing().createdAt &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoUrl', 'activeGroupId', 'smsPhone', 'smsEnabled', 'smsForMessages', 'smsForEvents', 'updatedAt']);
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoUrl', 'activeGroupId', 'smsPhone', 'smsEnabled', 'smsForMessages', 'smsForEvents', 'personalColorTheme', 'personalColorMode', 'personalBackground', 'personalBannerBackground', 'updatedAt']);
       allow delete: if isSignedIn() && isValidId(uid) && request.auth.uid == uid;
 
       match /joinedGroups/{groupId} {
@@ -362,7 +394,7 @@ service cloud.firestore {
     }
 
     match /groupCodes/{code} {
-      allow get: if isSignedIn() && isValidCodeId(code);
+      allow get: if isValidCodeId(code);
       allow list: if false;
       allow create: if isSignedIn() && isValidCodeId(code) &&
                        isValidGroupCode(incoming()) &&
@@ -385,8 +417,12 @@ service cloud.firestore {
     }
 
     match /groups/{groupId} {
-      allow get: if isSignedIn() && isValidId(groupId) &&
-                    (isGroupMember(groupId) || existing().ownerId == request.auth.uid || isGlobalAdmin());
+      allow get: if isValidId(groupId) && (
+                    resource == null ||
+                    (isSignedIn()
+                      ? (isGroupMember(groupId) || existing().ownerId == request.auth.uid || isGlobalAdmin())
+                      : existing().groupCode is string)
+                  );
       allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isGlobalAdmin());
       allow create: if isSignedIn() && isValidId(groupId) &&
                        isValidGroup(incoming()) &&
@@ -396,59 +432,118 @@ service cloud.firestore {
                        incoming().ownerId == existing().ownerId &&
                        incoming().createdAt == existing().createdAt && (
                          ((isGroupCreator(groupId) || isGlobalAdmin()) &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'groupCode', 'groupBackground', 'groupImageUrl', 'updatedAt'])) ||
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'groupCode', 'groupImageUrl', 'updatedAt'])) ||
                          (isGroupAdminOrCreator(groupId) &&
-                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'groupCode', 'groupBackground', 'updatedAt']))
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'groupCode', 'updatedAt']))
                        );
       allow delete: if isSignedIn() && isValidId(groupId) &&
                        (isGroupCreator(groupId) || isGlobalAdmin());
 
       match /members/{memberId} {
-        allow get: if isSignedIn() && isValidId(memberId) &&
-                      (request.auth.uid == memberId || isGroupMember(groupId) || isGlobalAdmin());
-        allow list: if isSignedIn() && (isGroupMember(groupId) || isGlobalAdmin());
-        allow create: if isSignedIn() && isValidId(memberId) &&
+        allow get: if isValidId(memberId) && (
+                      isSignedIn()
+                        ? (request.auth.uid == memberId || isGroupMember(groupId) || isGlobalAdmin())
+                        : groupDocExists(groupId)
+                    );
+        allow list: if isSignedIn()
+                       ? (isGroupMember(groupId) || isGlobalAdmin())
+                       : groupDocExists(groupId);
+        allow create: if isValidId(memberId) &&
                          isValidMember(incoming()) &&
                          incoming().uid == memberId && (
-                           (request.auth.uid == memberId && incoming().role == 'CREATOR' &&
-                            (isGroupCreator(groupId) ||
-                             getAfter(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid)) ||
-                           (request.auth.uid == memberId && incoming().role == 'PARTICIPANT' &&
-                            exists(/databases/$(database)/documents/groups/$(groupId))) ||
-                           isGroupCreator(groupId) ||
-                           isGlobalAdmin()
+                           (isSignedIn() && (
+                             (request.auth.uid == memberId && incoming().role == 'CREATOR' &&
+                              (isGroupCreator(groupId) ||
+                               getAfter(/databases/$(database)/documents/groups/$(groupId)).data.ownerId == request.auth.uid)) ||
+                             (request.auth.uid == memberId && incoming().role == 'PARTICIPANT' &&
+                              groupDocExists(groupId)) ||
+                             isGroupCreator(groupId) ||
+                             isGlobalAdmin()
+                           )) ||
+                           (request.auth == null &&
+                            isGuestId(memberId) &&
+                            incoming().role == 'PARTICIPANT' &&
+                            incoming().tasksSignedUpCount == 0 &&
+                            incoming().messagesSentCount == 0 &&
+                            incoming().joinedAt == request.time &&
+                            incoming().updatedAt == request.time &&
+                            groupDocExists(groupId))
                          );
-        allow update: if isSignedIn() && isValidId(memberId) &&
+        allow update: if isValidId(memberId) &&
                          isValidMember(incoming()) &&
                          incoming().uid == existing().uid &&
                          incoming().joinedAt == existing().joinedAt && (
-                           // Action 1: Self profile/activity update (cannot change role)
-                           (request.auth.uid == memberId &&
+                           (isSignedIn() && (
+                             // Action 1: Self profile/activity update (cannot change role)
+                             (request.auth.uid == memberId &&
+                              incoming().role == existing().role &&
+                              incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'tasksSignedUpCount', 'messagesSentCount', 'updatedAt'])) ||
+                             // Action 2: Group Creator has full control over any non-creator member's role
+                             ((isGroupCreator(groupId) || isGlobalAdmin()) &&
+                              memberId != get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId &&
+                              incoming().role in ['PARTICIPANT', 'ORGANIZER', 'ADMIN'] &&
+                              incoming().diff(existing()).affectedKeys().hasOnly(['role', 'updatedAt'])) ||
+                             // Action 3: Admin can promote non-admins, cannot demote existing ADMIN or touch CREATOR
+                             (isGroupAdminOnly(groupId) &&
+                              memberId != get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId &&
+                              existing().role in ['PARTICIPANT', 'ORGANIZER'] &&
+                              incoming().role in ['PARTICIPANT', 'ORGANIZER', 'ADMIN'] &&
+                              incoming().diff(existing()).affectedKeys().hasOnly(['role', 'updatedAt']))
+                           )) ||
+                           // Action 4: Code-joined guest self profile/activity update (cannot change role)
+                           (request.auth == null &&
+                            isGuestId(memberId) &&
+                            existing().role in ['PARTICIPANT', 'ORGANIZER', 'ADMIN'] &&
                             incoming().role == existing().role &&
-                            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'tasksSignedUpCount', 'messagesSentCount', 'updatedAt'])) ||
-                           // Action 2: Group Creator has full control over any non-creator member's role
-                           ((isGroupCreator(groupId) || isGlobalAdmin()) &&
-                            memberId != get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId &&
-                            incoming().role in ['PARTICIPANT', 'ORGANIZER', 'ADMIN'] &&
-                            incoming().diff(existing()).affectedKeys().hasOnly(['role', 'updatedAt'])) ||
-                           // Action 3: Admin can promote non-admins (including creating multiple admins), but cannot demote existing ADMIN or touch CREATOR
-                           (isGroupAdminOnly(groupId) &&
-                            memberId != get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId &&
-                            existing().role in ['PARTICIPANT', 'ORGANIZER'] &&
-                            incoming().role in ['PARTICIPANT', 'ORGANIZER', 'ADMIN'] &&
-                            incoming().diff(existing()).affectedKeys().hasOnly(['role', 'updatedAt']))
+                            incoming().updatedAt == request.time &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'tasksSignedUpCount', 'messagesSentCount', 'updatedAt']))
                          );
-        allow delete: if isSignedIn() && isValidId(memberId) && (
+        allow delete: if isValidId(memberId) && (
+                         (isSignedIn() && (
                            (request.auth.uid == memberId && memberId != get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId) ||
                            ((isGroupCreator(groupId) || isGlobalAdmin()) && memberId != get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId) ||
                            (isGroupAdminOnly(groupId) &&
                             memberId != get(/databases/$(database)/documents/groups/$(groupId)).data.ownerId &&
                             existing().role in ['PARTICIPANT', 'ORGANIZER'])
-                         );
+                         )) ||
+                         (request.auth == null &&
+                          isGuestId(memberId) &&
+                          existing().role != 'CREATOR')
+                       );
+      }
+
+      // Private PII subcollection: readable STRICTLY by Group Creator, Group Admins, Global Admins, or the signed-in owner
+      match /memberContacts/{memberId} {
+        allow get: if isSignedIn() && isValidId(memberId) &&
+                      (request.auth.uid == memberId || isGroupAdminOrCreator(groupId) || isGlobalAdmin());
+        allow list: if isSignedIn() && (isGroupAdminOrCreator(groupId) || isGlobalAdmin());
+        allow create, update: if isValidId(memberId) &&
+                                 isValidMemberContact(incoming()) &&
+                                 incoming().uid == memberId &&
+                                 incoming().updatedAt == request.time && (
+                                   (isSignedIn() && (
+                                     (request.auth.uid == memberId &&
+                                      incoming().authMethod == 'GOOGLE' &&
+                                      (isGroupMember(groupId) || isGroupCreator(groupId) || existsAfter(memberPath(groupId, memberId)))) ||
+                                     isGroupAdminOrCreator(groupId) ||
+                                     isGlobalAdmin()
+                                   )) ||
+                                   (request.auth == null &&
+                                    isGuestId(memberId) &&
+                                    incoming().authMethod == 'CODE_GUEST' &&
+                                    (!('email' in incoming()) || incoming().email == null) &&
+                                    (exists(memberPath(groupId, memberId)) || existsAfter(memberPath(groupId, memberId))))
+                                 );
+        allow delete: if isValidId(memberId) && (
+                         (isSignedIn() && (request.auth.uid == memberId || isGroupAdminOrCreator(groupId) || isGlobalAdmin())) ||
+                         (request.auth == null && isGuestId(memberId))
+                       );
       }
 
       match /events/{eventId} {
-        allow get, list: if isSignedIn() && (isGroupMember(groupId) || isGlobalAdmin());
+        allow get, list: if isSignedIn()
+                            ? (isGroupMember(groupId) || isGlobalAdmin())
+                            : groupDocExists(groupId);
         allow create: if isSignedIn() && isValidId(eventId) &&
                          isValidEvent(incoming()) &&
                          incoming().createdBy == request.auth.uid &&
@@ -463,42 +558,63 @@ service cloud.firestore {
                          (isGroupAdminOrCreator(groupId) || existing().createdBy == request.auth.uid || isGlobalAdmin());
 
         match /tasks/{taskId} {
-          allow get, list: if isSignedIn() && (isGroupMember(groupId) || isGlobalAdmin());
+          allow get, list: if isSignedIn()
+                              ? (isGroupMember(groupId) || isGlobalAdmin())
+                              : groupDocExists(groupId);
           allow create: if isSignedIn() && isValidId(taskId) &&
                            isValidTask(incoming()) &&
                            incoming().eventId == eventId &&
                            incoming().createdBy == request.auth.uid &&
                            exists(/databases/$(database)/documents/groups/$(groupId)/events/$(eventId)) &&
                            (isGroupOrganizerOrHigher(groupId) || isGlobalAdmin());
-          allow update: if isSignedIn() && isValidId(taskId) &&
+          allow update: if isValidId(taskId) &&
                            isValidTask(incoming()) &&
                            incoming().eventId == existing().eventId &&
                            incoming().createdBy == existing().createdBy &&
                            incoming().createdAt == existing().createdAt && (
-                             // Action 1: Organizer / Admin / Creator full task edit
-                             ((isGroupOrganizerOrHigher(groupId) || isGlobalAdmin()) &&
-                              incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'deadlineEpochMs', 'capacity', 'assignedCount', 'assignedUids', 'assignedNames', 'status', 'chatChannelId', 'updatedAt'])) ||
-                             // Action 2: Member claims a task slot (atomic bounds enforced)
-                             (isGroupMember(groupId) &&
+                             (isSignedIn() && (
+                               // Action 1: Organizer / Admin / Creator full task edit
+                               ((isGroupOrganizerOrHigher(groupId) || isGlobalAdmin()) &&
+                                incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'deadlineEpochMs', 'capacity', 'assignedCount', 'assignedUids', 'assignedNames', 'status', 'chatChannelId', 'updatedAt'])) ||
+                               // Action 2: Signed-in member claims a task slot
+                               (isGroupMember(groupId) &&
+                                existing().status != 'COMPLETED' &&
+                                !(request.auth.uid in existing().assignedUids) &&
+                                (request.auth.uid in incoming().assignedUids) &&
+                                incoming().assignedUids.size() == existing().assignedUids.size() + 1 &&
+                                incoming().assignedCount == existing().assignedCount + 1 &&
+                                incoming().assignedCount <= existing().capacity &&
+                                incoming().assignedNames.size() == existing().assignedNames.size() + 1 &&
+                                incoming().status in ['OPEN', 'FILLED'] &&
+                                incoming().diff(existing()).affectedKeys().hasOnly(['assignedUids', 'assignedNames', 'assignedCount', 'status', 'updatedAt'])) ||
+                               // Action 3: Signed-in member leaves a task slot
+                               (isGroupMember(groupId) &&
+                                existing().status != 'COMPLETED' &&
+                                (request.auth.uid in existing().assignedUids) &&
+                                !(request.auth.uid in incoming().assignedUids) &&
+                                incoming().assignedUids.size() == existing().assignedUids.size() - 1 &&
+                                incoming().assignedCount == existing().assignedCount - 1 &&
+                                incoming().assignedNames.size() == existing().assignedNames.size() - 1 &&
+                                incoming().status == 'OPEN' &&
+                                incoming().diff(existing()).affectedKeys().hasOnly(['assignedUids', 'assignedNames', 'assignedCount', 'status', 'updatedAt']))
+                             )) ||
+                             // Action 4: Code-joined guest member claims or leaves a task slot
+                             (request.auth == null &&
                               existing().status != 'COMPLETED' &&
-                              !(request.auth.uid in existing().assignedUids) &&
-                              (request.auth.uid in incoming().assignedUids) &&
-                              incoming().assignedUids.size() == existing().assignedUids.size() + 1 &&
-                              incoming().assignedCount == existing().assignedCount + 1 &&
-                              incoming().assignedCount <= existing().capacity &&
-                              incoming().assignedNames.size() == existing().assignedNames.size() + 1 &&
-                              incoming().status in ['OPEN', 'FILLED'] &&
-                              incoming().diff(existing()).affectedKeys().hasOnly(['assignedUids', 'assignedNames', 'assignedCount', 'status', 'updatedAt'])) ||
-                             // Action 3: Member leaves a task slot
-                             (isGroupMember(groupId) &&
-                              existing().status != 'COMPLETED' &&
-                              (request.auth.uid in existing().assignedUids) &&
-                              !(request.auth.uid in incoming().assignedUids) &&
-                              incoming().assignedUids.size() == existing().assignedUids.size() - 1 &&
-                              incoming().assignedCount == existing().assignedCount - 1 &&
-                              incoming().assignedNames.size() == existing().assignedNames.size() - 1 &&
-                              incoming().status == 'OPEN' &&
-                              incoming().diff(existing()).affectedKeys().hasOnly(['assignedUids', 'assignedNames', 'assignedCount', 'status', 'updatedAt']))
+                              incoming().updatedAt == request.time &&
+                              incoming().diff(existing()).affectedKeys().hasOnly(['assignedUids', 'assignedNames', 'assignedCount', 'status', 'updatedAt']) && (
+                                (incoming().assignedUids.size() == existing().assignedUids.size() + 1 &&
+                                 incoming().assignedCount == existing().assignedCount + 1 &&
+                                 incoming().assignedCount <= existing().capacity &&
+                                 incoming().assignedNames.size() == existing().assignedNames.size() + 1 &&
+                                 isGuestId(incoming().assignedUids[incoming().assignedUids.size() - 1]) &&
+                                 exists(memberPath(groupId, incoming().assignedUids[incoming().assignedUids.size() - 1])) &&
+                                 incoming().status in ['OPEN', 'FILLED']) ||
+                                (incoming().assignedUids.size() == existing().assignedUids.size() - 1 &&
+                                 incoming().assignedCount == existing().assignedCount - 1 &&
+                                 incoming().assignedNames.size() == existing().assignedNames.size() - 1 &&
+                                 incoming().status == 'OPEN')
+                              ))
                            );
           allow delete: if isSignedIn() && isValidId(taskId) &&
                            (isGroupAdminOrCreator(groupId) || existing().createdBy == request.auth.uid || isGlobalAdmin());
@@ -506,40 +622,61 @@ service cloud.firestore {
       }
 
       match /channels/{channelId} {
-        allow get: if isSignedIn() && isValidId(channelId) &&
-                      (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannel(groupId, existing().accessLevel)));
-        allow list: if isSignedIn() &&
-                       (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannel(groupId, resource.data.accessLevel)));
+        allow get: if isValidId(channelId) && (
+                      isSignedIn()
+                        ? (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannel(groupId, existing().accessLevel)))
+                        : (existing().accessLevel == 'ALL' && groupDocExists(groupId))
+                    );
+        allow list: if isSignedIn()
+                       ? (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannel(groupId, resource.data.accessLevel)))
+                       : (resource.data.accessLevel == 'ALL' && groupDocExists(groupId));
         allow create: if isSignedIn() && isValidId(channelId) &&
                          isValidChannel(incoming()) &&
                          incoming().createdBy == request.auth.uid &&
                          (isGlobalAdmin() ||
                           (isGroupOrganizerOrHigher(groupId) && canAccessChannel(groupId, incoming().accessLevel)) ||
                           isGroupCreatorAfter(groupId));
-        allow update: if isSignedIn() && isValidId(channelId) &&
+        allow update: if isValidId(channelId) &&
                          isValidChannel(incoming()) &&
                          incoming().createdBy == existing().createdBy &&
                          incoming().createdAt == existing().createdAt && (
-                           ((isGroupOrganizerOrHigher(groupId) || isGlobalAdmin()) &&
-                            canAccessChannel(groupId, existing().accessLevel) &&
-                            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'accessLevel', 'eventId', 'updatedAt'])) ||
-                           (isGroupMember(groupId) &&
-                            canAccessChannel(groupId, existing().accessLevel) &&
+                           (isSignedIn() && (
+                             ((isGroupOrganizerOrHigher(groupId) || isGlobalAdmin()) &&
+                              canAccessChannel(groupId, existing().accessLevel) &&
+                              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'accessLevel', 'eventId', 'updatedAt'])) ||
+                             (isGroupMember(groupId) &&
+                              canAccessChannel(groupId, existing().accessLevel) &&
+                              incoming().diff(existing()).affectedKeys().hasOnly(['messageCount', 'lastMessagePreview', 'lastMessageAt', 'updatedAt']))
+                           )) ||
+                           (request.auth == null &&
+                            existing().accessLevel == 'ALL' &&
+                            incoming().messageCount == existing().messageCount + 1 &&
+                            incoming().updatedAt == request.time &&
                             incoming().diff(existing()).affectedKeys().hasOnly(['messageCount', 'lastMessagePreview', 'lastMessageAt', 'updatedAt']))
                          );
         allow delete: if isSignedIn() && isValidId(channelId) &&
                          (isGroupAdminOrCreator(groupId) || isGlobalAdmin());
 
         match /messages/{messageId} {
-          allow get, list: if isSignedIn() &&
-                            (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId)));
-          allow create: if isSignedIn() && isValidId(messageId) &&
+          allow get, list: if isSignedIn()
+                              ? (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId)))
+                              : isPublicGroupChannel(groupId, channelId);
+          allow create: if isValidId(messageId) &&
                            isValidMessage(incoming()) &&
-                           incoming().channelId == channelId &&
-                           incoming().senderId == request.auth.uid &&
-                           (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId))) &&
-                           (incoming().messageType == 'TEXT' || isGroupOrganizerOrHigher(groupId) || isGlobalAdmin());
-          allow update: if isSignedIn() && isValidId(messageId) &&
+                           incoming().channelId == channelId && (
+                             (isSignedIn() &&
+                              incoming().senderId == request.auth.uid &&
+                              (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId))) &&
+                              (incoming().messageType == 'TEXT' || isGroupOrganizerOrHigher(groupId) || isGlobalAdmin())) ||
+                             (request.auth == null &&
+                              isGuestId(incoming().senderId) &&
+                              exists(memberPath(groupId, incoming().senderId)) &&
+                              isPublicGroupChannel(groupId, channelId) &&
+                              incoming().senderRole in ['PARTICIPANT', 'ORGANIZER', 'ADMIN'] &&
+                              incoming().messageType == 'TEXT' &&
+                              incoming().createdAt == request.time)
+                           );
+          allow update: if isValidId(messageId) &&
                            isValidMessage(incoming()) &&
                            incoming().channelId == existing().channelId &&
                            incoming().senderId == existing().senderId &&
@@ -547,42 +684,68 @@ service cloud.firestore {
                            incoming().senderRole == existing().senderRole &&
                            incoming().messageType == existing().messageType &&
                            incoming().createdAt == existing().createdAt &&
-                           (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId))) &&
-                           (existing().senderId == request.auth.uid || isGroupAdminOrCreator(groupId) || isGlobalAdmin()) &&
-                           incoming().diff(existing()).affectedKeys().hasOnly(['text', 'updatedAt']);
+                           incoming().diff(existing()).affectedKeys().hasOnly(['text', 'updatedAt']) && (
+                             (isSignedIn() &&
+                              (isGlobalAdmin() || (isGroupMember(groupId) && canAccessChannelById(groupId, channelId))) &&
+                              (existing().senderId == request.auth.uid || isGroupAdminOrCreator(groupId) || isGlobalAdmin())) ||
+                             (request.auth == null &&
+                              isGuestId(existing().senderId) &&
+                              exists(memberPath(groupId, existing().senderId)) &&
+                              isPublicGroupChannel(groupId, channelId) &&
+                              incoming().updatedAt == request.time)
+                           );
           allow delete: if isSignedIn() && isValidId(messageId) &&
                            (isGroupAdminOrCreator(groupId) || isGlobalAdmin());
         }
       }
 
       match /notifications/{notificationId} {
-        allow get: if isSignedIn() && isValidId(notificationId) && (
-                      isGlobalAdmin() ||
-                      (isGroupMember(groupId) && (
-                        canAccessNotification(groupId, existing().targetRole) ||
-                        existing().senderId == request.auth.uid
-                      ))
+        allow get: if isValidId(notificationId) && (
+                      isSignedIn()
+                        ? (isGlobalAdmin() ||
+                           (isGroupMember(groupId) && (
+                             canAccessNotification(groupId, existing().targetRole) ||
+                             existing().senderId == request.auth.uid
+                           )))
+                        : (groupDocExists(groupId) && (
+                            existing().targetRole in ['ALL', 'PARTICIPANT'] ||
+                            isGuestId(existing().senderId)
+                          ))
                    );
-        allow list: if isSignedIn() && (
-                       isGlobalAdmin() ||
-                       (isGroupMember(groupId) && (
-                         canAccessNotification(groupId, resource.data.targetRole) ||
-                         resource.data.senderId == request.auth.uid
-                       ))
-                    );
-        allow create: if isSignedIn() && isValidId(notificationId) &&
-                         isValidNotification(incoming()) &&
-                         incoming().senderId == request.auth.uid && (
-                           (isGroupAdminOrCreator(groupId) || isGlobalAdmin()) ||
-                           (incoming().notificationType in ['TASK_UPDATE', 'DEADLINE_REMINDER'] &&
-                            isGroupOrganizerOrHigher(groupId) &&
-                            (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'APPROVED')) ||
-                           (isGroupMember(groupId) &&
+        allow list: if isSignedIn()
+                       ? (isGlobalAdmin() ||
+                          (isGroupMember(groupId) && (
+                            canAccessNotification(groupId, resource.data.targetRole) ||
+                            resource.data.senderId == request.auth.uid
+                          )))
+                       : (groupDocExists(groupId) && (
+                           resource.data.targetRole in ['ALL', 'PARTICIPANT'] ||
+                           isGuestId(resource.data.senderId)
+                         ));
+        allow create: if isValidId(notificationId) &&
+                         isValidNotification(incoming()) && (
+                           (isSignedIn() &&
+                            incoming().senderId == request.auth.uid && (
+                              (isGroupAdminOrCreator(groupId) || isGlobalAdmin()) ||
+                              (incoming().notificationType in ['TASK_UPDATE', 'DEADLINE_REMINDER'] &&
+                               isGroupOrganizerOrHigher(groupId) &&
+                               (!('approvalStatus' in incoming()) || incoming().approvalStatus == 'APPROVED')) ||
+                              (isGroupMember(groupId) &&
+                               incoming().notificationType == 'ANNOUNCEMENT' &&
+                               incoming().targetScope == 'ALL' &&
+                               incoming().targetRole == 'ADMIN' &&
+                               ('approvalStatus' in incoming()) &&
+                               incoming().approvalStatus == 'PENDING')
+                            )) ||
+                           (request.auth == null &&
+                            isGuestId(incoming().senderId) &&
+                            exists(memberPath(groupId, incoming().senderId)) &&
                             incoming().notificationType == 'ANNOUNCEMENT' &&
                             incoming().targetScope == 'ALL' &&
                             incoming().targetRole == 'ADMIN' &&
                             ('approvalStatus' in incoming()) &&
-                            incoming().approvalStatus == 'PENDING')
+                            incoming().approvalStatus == 'PENDING' &&
+                            incoming().createdAt == request.time)
                          );
         allow update: if isSignedIn() && isValidId(notificationId) &&
                          isValidNotification(incoming()) &&
@@ -612,10 +775,16 @@ service cloud.firestore {
                       (isGroupOrganizerOrHigher(groupId) || isGlobalAdmin());
         allow list: if isSignedIn() &&
                        (isGroupOrganizerOrHigher(groupId) || isGlobalAdmin());
-        allow create: if isSignedIn() && isValidId(logId) &&
-                         isValidActivityLog(incoming()) &&
-                         incoming().actorId == request.auth.uid &&
-                         (isGroupMember(groupId) || isGlobalAdmin());
+        allow create: if isValidId(logId) &&
+                         isValidActivityLog(incoming()) && (
+                           (isSignedIn() &&
+                            incoming().actorId == request.auth.uid &&
+                            (isGroupMember(groupId) || isGlobalAdmin())) ||
+                           (request.auth == null &&
+                            isGuestId(incoming().actorId) &&
+                            incoming().actorRole in ['PARTICIPANT', 'ORGANIZER', 'ADMIN'] &&
+                            (exists(memberPath(groupId, incoming().actorId)) || existsAfter(memberPath(groupId, incoming().actorId))))
+                         );
         allow update: if false;
         allow delete: if isSignedIn() && isValidId(logId) &&
                          (isGroupAdminOrCreator(groupId) || isGlobalAdmin());

@@ -1,4 +1,5 @@
 import { auth } from './firebase';
+import { getStoredGuestSession } from './guestSession';
 
 export enum OperationType {
   CREATE = 'create',
@@ -31,13 +32,14 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null
 ): never {
+  const guest = getStoredGuestSession();
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid ?? null,
+      userId: auth.currentUser?.uid ?? guest?.uid ?? null,
       email: auth.currentUser?.email ?? null,
       emailVerified: auth.currentUser?.emailVerified ?? null,
-      isAnonymous: auth.currentUser?.isAnonymous ?? null,
+      isAnonymous: auth.currentUser ? auth.currentUser.isAnonymous : Boolean(guest),
       tenantId: auth.currentUser?.tenantId ?? null,
       providerInfo:
         auth.currentUser?.providerData?.map((provider) => ({

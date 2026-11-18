@@ -4,6 +4,7 @@ import {
   ActivityCategory,
   type GroupActivityLog,
   type GroupMember,
+  type MemberContactInfo,
   MemberRole,
   parseActivityAction,
   parseActivityCategory,
@@ -260,11 +261,15 @@ export function buildAuditLogCsv(
 
 export function buildGroupMembersCsv(
   members: GroupMember[],
-  group: RallyGroup | null
+  group: RallyGroup | null,
+  contactsByUid: Record<string, MemberContactInfo> = {}
 ): string {
   const headers = [
     'Member UID',
     'Display Name',
+    'Cell Phone Number',
+    'Email',
+    'Sign-In Method',
     'Role',
     'Role Code',
     'Tasks Signed Up',
@@ -279,9 +284,20 @@ export function buildGroupMembersCsv(
 
   const rows = members.map((member) => {
     const role = parseMemberRole(member.role);
+    const contact = contactsByUid[member.uid];
+    const signInMethod = contact
+      ? contact.authMethod === 'CODE_GUEST'
+        ? 'Group Code'
+        : 'Google'
+      : member.uid.startsWith('guest_')
+        ? 'Group Code'
+        : 'Google';
     return [
       member.uid,
       member.displayName,
+      contact?.phoneNumber ?? '',
+      contact?.email ?? '',
+      signInMethod,
       ROLE_META[role].label,
       role,
       member.tasksSignedUpCount,
@@ -302,6 +318,7 @@ export function buildCombinedRecordKeepingCsv(
   members: GroupMember[],
   auditEntries: GroupActivityLog[],
   group: RallyGroup | null,
+  contactsByUid: Record<string, MemberContactInfo> = {},
   exportedAtMs = Date.now()
 ): string {
   const headers = [
@@ -309,8 +326,8 @@ export function buildCombinedRecordKeepingCsv(
     'Record ID',
     'Primary Name / Summary',
     'Role / Category',
-    'Action / Tasks Signed Up',
-    'Details / Messages Sent',
+    'Cell Phone / Action',
+    'Email / Details',
     'Actor Name',
     'Actor Role',
     'Timestamp (ISO)',
@@ -342,13 +359,21 @@ export function buildCombinedRecordKeepingCsv(
 
   for (const member of members) {
     const role = parseMemberRole(member.role);
+    const contact = contactsByUid[member.uid];
+    const contactSummary = [
+      contact?.email ? `Email: ${contact.email}` : null,
+      `Tasks: ${member.tasksSignedUpCount}`,
+      `Messages: ${member.messagesSentCount}`,
+    ]
+      .filter(Boolean)
+      .join(' | ');
     rows.push([
       'GROUP_MEMBER',
       member.uid,
       member.displayName,
       ROLE_META[role].label,
-      `Tasks: ${member.tasksSignedUpCount}`,
-      `Messages: ${member.messagesSentCount}`,
+      contact?.phoneNumber ?? '',
+      contactSummary,
       member.displayName,
       ROLE_META[role].label,
       formatEpochIso(member.joinedAtMs),

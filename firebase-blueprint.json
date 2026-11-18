@@ -25,6 +25,30 @@
         "smsEnabled": { "type": "boolean", "description": "Master opt-in for SMS push notifications." },
         "smsForMessages": { "type": "boolean", "description": "Receive SMS push notifications for new group chat messages." },
         "smsForEvents": { "type": "boolean", "description": "Receive SMS push notifications for calendar events and reminders." },
+        "personalColorTheme": {
+          "type": "string",
+          "maxLength": 24,
+          "pattern": "^(default|emerald|violet|coral|ocean|rose|amber|indigo|custom:#[0-9A-Fa-f]{6}|dual:#[0-9A-Fa-f]{6}:#[0-9A-Fa-f]{6})$",
+          "description": "Optional per-user accent color theme preset or custom hex pair isolated strictly to this user."
+        },
+        "personalColorMode": {
+          "type": "string",
+          "enum": ["system", "light", "dark"],
+          "maxLength": 10,
+          "description": "Optional per-user display mode preference (system, light, or dark) isolated strictly to this user."
+        },
+        "personalBackground": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(theme|default|ocean-mist|emerald-grove|sunset-warmth|lavender-studio|midnight-canvas|dot-grid|diagonal-weave|emerald|sunset|midnight|royal|teal-ocean|solid:#[0-9A-Fa-f]{6}|gradient:#[0-9A-Fa-f]{6}:#[0-9A-Fa-f]{6})$",
+          "description": "Optional per-user main app canvas background isolated strictly to this user."
+        },
+        "personalBannerBackground": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(theme|default|ocean-mist|emerald-grove|sunset-warmth|lavender-studio|midnight-canvas|dot-grid|diagonal-weave|emerald|sunset|midnight|royal|teal-ocean|solid:#[0-9A-Fa-f]{6}|gradient:#[0-9A-Fa-f]{6}:#[0-9A-Fa-f]{6})$",
+          "description": "Optional per-user header and group banner background isolated strictly to this user."
+        },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
       },
@@ -90,6 +114,21 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "displayName", "role", "tasksSignedUpCount", "messagesSentCount", "joinedAt", "updatedAt"]
+    },
+    "MemberContact": {
+      "title": "MemberContact",
+      "description": "Private member contact record containing cell phone number and optional email, readable strictly by the Group Creator, Group Admins, Global Admins, or the signed-in owner.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID or guest_* session UID." },
+        "displayName": { "type": "string", "description": "Member full or display name." },
+        "phoneNumber": { "type": "string", "description": "E.164 cell phone number (e.g. +15551234567)." },
+        "email": { "type": "string", "description": "Optional Google email address when signed in via Google." },
+        "authMethod": { "type": "string", "enum": ["GOOGLE", "CODE_GUEST"], "description": "Whether member joined via Google Sign-In or Group Code + Name." },
+        "smsEnabled": { "type": "boolean", "description": "Whether member opted in to SMS text alerts." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp." }
+      },
+      "required": ["uid", "displayName", "phoneNumber", "authMethod", "smsEnabled", "updatedAt"]
     },
     "RallyEvent": {
       "title": "RallyEvent",
@@ -269,6 +308,10 @@
     "/groups/{groupId}/members/{memberId}": {
       "schema": { "$ref": "#/entities/GroupMember" },
       "description": "Group member roles and engagement counters."
+    },
+    "/groups/{groupId}/memberContacts/{memberId}": {
+      "schema": { "$ref": "#/entities/MemberContact" },
+      "description": "Private member contact information (cell phone & name) visible only to Group Creator, Admins, and the member."
     },
     "/groups/{groupId}/events/{eventId}": {
       "schema": { "$ref": "#/entities/RallyEvent" },

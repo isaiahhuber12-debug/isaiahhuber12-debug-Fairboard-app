@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { User } from 'firebase/auth';
 import * as repo from '../services/rallyRepository';
-import { describeBackgroundSpec } from '../lib/backgrounds';
+import {
+  DEFAULT_PERSONAL_APPEARANCE,
+  describeBackgroundSpec,
+  describeColorTheme,
+  type PersonalAppearance,
+  readStoredPersonalAppearance,
+  sanitizePersonalAppearance,
+} from '../lib/backgrounds';
 import {
   type AuditLogScope,
   buildAuditLogCsv,
@@ -39,6 +45,7 @@ import {
   type GroupMember,
   type HubNotification,
   type JoinedGroupRef,
+  type MemberContactInfo,
   MemberRole,
   MessageType,
   NotificationType,
@@ -49,6 +56,7 @@ import {
   ROLE_META,
   type SmsPreferences,
   TaskStatus,
+  type WorkspaceIdentity,
 } from '../types/rally';
 
 export interface InAppReminderNotification {
@@ -62,8 +70,16 @@ export interface InAppReminderNotification {
   triggeredAtMs: number;
 }
 
+export interface PendingJoinRequest {
+  code: string;
+  displayName: string | null;
+  phoneNumber?: string | null;
+  switchGroupId?: string | null;
+}
+
 export interface RallyWorkspaceState {
   isCloudMode: boolean;
+  isGuest: boolean;
   currentUserId: string;
   currentUserName: string;
   currentUserEmail: string | null;
@@ -80,14 +96,18 @@ export interface RallyWorkspaceState {
   notificationsState: AsyncDataState<HubNotification[]>;
   activityLogsState: AsyncDataState<GroupActivityLog[]>;
   membersState: AsyncDataState<GroupMember[]>;
+  memberContactsByUid: Record<string, MemberContactInfo>;
   analytics: EngagementAnalytics;
   remindedTimes: Record<string, number[]>;
   inAppNotifications: InAppReminderNotification[];
+  personalAppearance: PersonalAppearance;
   appBackground: string;
   groupBackgroundsById: Record<string, string>;
   groupImagesById: Record<string, string | null>;
   smsPreferences: SmsPreferences;
+  smsPrefsLoaded: boolean;
   smsServerConfigured: boolean;
+  smsServerStatus: smsService.SmsServerStatus;
   bannerMessage: string | null;
   isBusy: boolean;
 }
@@ -96,7 +116,11 @@ export interface RallyWorkspaceActions {
   selectEvent: (eventId: string | null) => void;
   selectChannel: (channelId: string | null) => void;
   switchGroup: (groupId: string) => void;
-  joinGroupByCode: (code: string, displayName?: string | null) => Promise<void>;
+  joinGroupByCode: (
+    code: string,
+    displayName?: string | null,
+    phoneNumber?: string | null
+  ) => Promise<boolean>;
   createGroupWithCode: (
     name: string,
     description: string,
@@ -106,11 +130,13 @@ export interface RallyWorkspaceActions {
   ) => Promise<boolean>;
   updateGroupCode: (newCode: string) => Promise<void>;
   updateGroupDetails: (name: string, description: string) => Promise<void>;
+  updatePersonalAppearance: (patch: Partial<PersonalAppearance>) => Promise<void>;
+  resetPersonalAppearance: () => Promise<void>;
   updateAppBackground: (backgroundSpec: string) => Promise<void>;
   updateGroupBackground: (groupId: string, backgroundSpec: string) => Promise<void>;
   updateGroupImage: (groupId: string, groupImageUrl: string | null) => Promise<boolean>;
   deleteGroup: (groupId: string, groupCode?: string | null) => Promise<void>;
-  updateDisplayName: (newDisplayName: string) => Promise<void>;
+  updateDisplayName: (newDisplayName: string, newPhoneNumber?: string | null) => Promise<void>;
   createEvent: (
     title: string,
     description: string,
@@ -201,8 +227,20 @@ export interface RallyWorkspaceActions {
   toggleEventReminder30m: (event: RallyEvent) => void;
   dismissInAppNotification: (notificationId: string) => void;
   dismissAllInAppNotifications: () => void;
-  saveSmsPreferences: (prefs: SmsPreferences) => Promise<boolean>;
-  sendTestSms: (phone: string) => Promise<void>;
+  saveSmsPreferences: (prefs: SmsPreferences, newDisplayName?: string) => Promise<boolean>;
+  sendTestSms: (phone: string) => Promise<{ ok: boolean; error?: string }>;
+  sendDirectSmsBroadcast: (
+    phones: string[],
+    message: string
+  ) => Promise<{
+    ok: boolean;
+    sentCount: number;
+    failedCount: number;
+    configured: boolean;
+    error?: string;
+  }>;
+  refreshSmsServerStatus: () => Promise<smsService.SmsServerStatus>;
+  requestGoogleSignIn: () => void;
   exportAuditLogCsv: (options?: {
     scope?: AuditLogScope;
     searchQuery?: string;
@@ -216,11 +254,13 @@ export interface RallyWorkspaceActions {
 }
 
 export function useRallyWorkspace(
-  user: User,
-  pendingJoin: { code: string; displayName: string | null } | null,
-  onPendingJoinConsumed: () => void
+  identity: WorkspaceIdentity,
+  pendingJoin: PendingJoinRequest | null,
+  onPendingJoinConsumed: () => void,
+  onRequestGoogleSignIn?: () => void
 ): { state: RallyWorkspaceState; actions: RallyWorkspaceActions } {
-  const uid = user.uid;
+  const uid = identity.uid;
+  const isGuest = identity.isGuest;
 
   const [joinedGroups, setJoinedGroups] = useState<JoinedGroupRef[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
@@ -282,11 +322,22 @@ export function useRallyWorkspace(
     }
   });
   const [inAppNotifications, setInAppNotifications] = useState<InAppReminderNotification[]>([]);
-  const [appBackground, setAppBackground] = useState<string>('default');
+  const [personalAppearance, setPersonalAppearance] = useState<PersonalAppearance>(() =>
+    readStoredPersonalAppearance(uid)
+  );
+  const appBackground = personalAppearance.appBackground;
   const [groupBackgroundsById, setGroupBackgroundsById] = useState<Record<string, string>>({});
   const [groupImagesById, setGroupImagesById] = useState<Record<string, string | null>>({});
+  const [memberContactsEntry, setMemberContactsEntry] = useState<{
+    groupId: string;
+    map: Record<string, MemberContactInfo>;
+  } | null>(null);
   const [smsPreferences, setSmsPreferences] = useState<SmsPreferences>(DEFAULT_SMS_PREFERENCES);
-  const [smsServerConfigured, setSmsServerConfigured] = useState<boolean>(false);
+  const [smsPrefsLoaded, setSmsPrefsLoaded] = useState<boolean>(false);
+  const [smsServerStatus, setSmsServerStatus] = useState<smsService.SmsServerStatus>(
+    smsService.DEFAULT_SMS_SERVER_STATUS
+  );
+  const smsServerConfigured = smsServerStatus.configured || smsServerStatus.secretsPresent;
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
 
@@ -410,34 +461,41 @@ export function useRallyWorkspace(
     }
   }, [remindedTimes, uid]);
 
-  // Ensure user profile exists on sign-in
+  // Ensure user profile exists on Google sign-in
   useEffect(() => {
+    if (isGuest) return;
     void repo.ensureUserProfile().catch((err) => {
       console.warn('Could not sync user profile:', err);
     });
-  }, [uid]);
+  }, [uid, isGuest]);
 
-  // Observe main app interface appearance
+  // Observe strictly per-user personal colors & background
   useEffect(() => {
-    return repo.subscribeAppAppearance(
-      (bg) => setAppBackground(bg),
+    return repo.subscribeUserPersonalAppearance(
+      uid,
+      (nextAppearance) => setPersonalAppearance(nextAppearance),
       () => {}
     );
-  }, []);
+  }, [uid]);
 
   // Observe user SMS preferences & check SMS server availability
   useEffect(() => {
     return repo.subscribeUserSmsPreferences(
       uid,
-      (prefs) => setSmsPreferences(prefs),
-      () => {}
+      (prefs) => {
+        setSmsPreferences(prefs);
+        setSmsPrefsLoaded(true);
+      },
+      () => {
+        setSmsPrefsLoaded(true);
+      }
     );
   }, [uid]);
 
   useEffect(() => {
     let cancelled = false;
     void smsService.fetchSmsServerStatus().then((res) => {
-      if (!cancelled) setSmsServerConfigured(res.configured);
+      if (!cancelled) setSmsServerStatus(res);
     });
     return () => {
       cancelled = true;
@@ -671,7 +729,7 @@ export function useRallyWorkspace(
   }, [remindedTimes, eventsState, fireInAppReminder, getFiredRemindersMap]);
 
   const fallbackName =
-    user.displayName?.trim() || user.email?.split('@')[0]?.trim() || 'Member';
+    identity.displayName?.trim() || identity.email?.split('@')[0]?.trim() || 'Participant';
 
   // Normalize members list and ensure creator present
   const normalizedMembersState: AsyncDataState<GroupMember[]> = useMemo(() => {
@@ -721,6 +779,7 @@ export function useRallyWorkspace(
   }, [activeGroup, uid, membersState]);
 
   const currentRole: MemberRole = useMemo(() => {
+    if (isGuest) return MemberRole.PARTICIPANT;
     if (activeGroup && activeGroup.ownerId === uid) return MemberRole.CREATOR;
     if (normalizedMembersState.status === 'success') {
       const found = normalizedMembersState.data.find((m) => m.uid === uid);
@@ -728,7 +787,7 @@ export function useRallyWorkspace(
     }
     const ref = joinedGroups.find((g) => g.groupId === activeGroup?.id);
     return ref ? parseMemberRole(ref.role) : MemberRole.PARTICIPANT;
-  }, [activeGroup, uid, normalizedMembersState, joinedGroups]);
+  }, [isGuest, activeGroup, uid, normalizedMembersState, joinedGroups]);
 
   const currentUserName = useMemo(() => {
     if (normalizedMembersState.status === 'success') {
@@ -892,7 +951,7 @@ export function useRallyWorkspace(
   }, [effectiveGroupId, currentRole, uid, notificationsEntry]);
 
   // Observe group activity logs for managers (Organizers, Admins, Creator)
-  const canViewActivityLog = ROLE_META[currentRole].canManageEventsAndTasks;
+  const canViewActivityLog = !isGuest && ROLE_META[currentRole].canManageEventsAndTasks;
   useEffect(() => {
     if (!effectiveGroupId || !canViewActivityLog) return;
     const subKey = `${effectiveGroupId}:${currentRole}`;
@@ -916,6 +975,51 @@ export function useRallyWorkspace(
     if (activityLogsEntry?.key === subKey) return activityLogsEntry.state;
     return { status: 'loading' };
   }, [effectiveGroupId, canViewActivityLog, currentRole, activityLogsEntry]);
+
+  // Observe private member contact directory (name, cell phone, email) for Creator & Admins
+  const canViewMemberContacts = !isGuest && ROLE_META[currentRole].canAccessAdminPanel;
+  useEffect(() => {
+    if (!effectiveGroupId || !canViewMemberContacts) return;
+    const targetGroupId = effectiveGroupId;
+    return repo.subscribeMemberContacts(
+      targetGroupId,
+      (map) => setMemberContactsEntry({ groupId: targetGroupId, map }),
+      () => {}
+    );
+  }, [effectiveGroupId, canViewMemberContacts]);
+
+  const memberContactsByUid: Record<string, MemberContactInfo> = useMemo(() => {
+    if (!effectiveGroupId || !canViewMemberContacts) return {};
+    if (memberContactsEntry?.groupId === effectiveGroupId) return memberContactsEntry.map;
+    return {};
+  }, [effectiveGroupId, canViewMemberContacts, memberContactsEntry]);
+
+  // Keep own contact record synced in active group whenever phone & name are known
+  const syncedContactKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!effectiveGroupId || !smsPreferences.phone || !currentUserName.trim()) return;
+    const syncKey = `${effectiveGroupId}:${uid}:${currentUserName}:${smsPreferences.phone}:${smsPreferences.enabled}`;
+    if (syncedContactKeyRef.current === syncKey) return;
+    syncedContactKeyRef.current = syncKey;
+    void repo
+      .upsertMemberContact(effectiveGroupId, {
+        uid,
+        displayName: currentUserName,
+        phoneNumber: smsPreferences.phone,
+        email: identity.email,
+        authMethod: isGuest ? 'CODE_GUEST' : 'GOOGLE',
+        smsEnabled: smsPreferences.enabled,
+      })
+      .catch(() => {});
+  }, [
+    effectiveGroupId,
+    uid,
+    currentUserName,
+    smsPreferences.phone,
+    smsPreferences.enabled,
+    identity.email,
+    isGuest,
+  ]);
 
   // Observe messages for selected channel
   useEffect(() => {
@@ -953,7 +1057,11 @@ export function useRallyWorkspace(
     }));
     void smsService
       .syncSmsSubscriptionsToServer(memberships, smsPreferences)
-      .then((res) => setSmsServerConfigured(res.configured))
+      .then((res) =>
+        setSmsServerStatus((prev) =>
+          prev.configured === res.configured ? prev : { ...prev, configured: res.configured }
+        )
+      )
       .catch(() => {});
   }, [joinedGroups, smsPreferences, activeGroup?.id, currentRole]);
 
@@ -966,14 +1074,20 @@ export function useRallyWorkspace(
   }, []);
 
   const joinGroupByCode = useCallback(
-    async (code: string, displayName?: string | null) => {
+    async (
+      code: string,
+      displayName?: string | null,
+      phoneNumber?: string | null
+    ): Promise<boolean> => {
       setIsBusy(true);
       try {
-        const newGroupId = await repo.joinGroupByCode(code, displayName);
+        const newGroupId = await repo.joinGroupByCode(code, displayName, phoneNumber);
         switchGroup(newGroupId);
         setBannerMessage(`Joined group ${repo.normalizeGroupCode(code)}`);
+        return true;
       } catch (err) {
         setBannerMessage(getFriendlyErrorMessage(err, 'Failed to join group'));
+        return false;
       } finally {
         setIsBusy(false);
       }
@@ -981,16 +1095,29 @@ export function useRallyWorkspace(
     [switchGroup]
   );
 
-  // Consume pending join code from AuthAndJoinScreen
+  // Consume pending join code or direct group switch from AuthAndJoinScreen
   const pendingCodeRef = useRef<string | null>(null);
   useEffect(() => {
-    if (pendingJoin && pendingJoin.code && pendingCodeRef.current !== pendingJoin.code) {
+    if (!pendingJoin) return;
+    if (pendingJoin.switchGroupId) {
+      if (pendingCodeRef.current !== `switch:${pendingJoin.switchGroupId}`) {
+        pendingCodeRef.current = `switch:${pendingJoin.switchGroupId}`;
+        switchGroup(pendingJoin.switchGroupId);
+        onPendingJoinConsumed();
+      }
+      return;
+    }
+    if (pendingJoin.code && pendingCodeRef.current !== pendingJoin.code) {
       pendingCodeRef.current = pendingJoin.code;
-      void joinGroupByCode(pendingJoin.code, pendingJoin.displayName).finally(() => {
+      void joinGroupByCode(
+        pendingJoin.code,
+        pendingJoin.displayName,
+        pendingJoin.phoneNumber
+      ).finally(() => {
         onPendingJoinConsumed();
       });
     }
-  }, [pendingJoin, joinGroupByCode, onPendingJoinConsumed]);
+  }, [pendingJoin, joinGroupByCode, onPendingJoinConsumed, switchGroup]);
 
   const analytics: EngagementAnalytics = useMemo(() => {
     const members = normalizedMembersState.status === 'success' ? normalizedMembersState.data : [];
@@ -1133,62 +1260,68 @@ export function useRallyWorkspace(
           setIsBusy(false);
         }
       },
-      updateAppBackground: async (backgroundSpec) => {
-        const sourceGroupId =
-          (activeGroup && ROLE_META[currentRole].canAccessAdminPanel ? activeGroup.id : null) ??
-          joinedGroups.find((g) => ROLE_META[parseMemberRole(g.role)].canAccessAdminPanel)?.groupId;
-        if (!sourceGroupId) {
-          setBannerMessage('Only Admins or a Group Creator can customize app backgrounds.');
-          return;
-        }
-        setIsBusy(true);
+      updatePersonalAppearance: async (patch) => {
+        const merged = sanitizePersonalAppearance({
+          ...personalAppearance,
+          ...patch,
+        });
+        setPersonalAppearance(merged);
         try {
-          await repo.updateAppBackground(sourceGroupId, backgroundSpec, currentUserName);
-          if (activeGroup) {
-            logActivity(
-              activeGroup.id,
-              ActivityCategory.GROUP,
-              ActivityAction.GROUP_UPDATED,
-              'Updated main app interface background',
-              describeBackgroundSpec(backgroundSpec),
-              activeGroup.id
+          await repo.saveUserPersonalAppearance(merged);
+          if (patch.colorTheme !== undefined) {
+            setBannerMessage(`Your colors updated (${describeColorTheme(merged.colorTheme)})`);
+          } else if (patch.appBackground !== undefined) {
+            setBannerMessage(
+              `Your app background updated (${describeBackgroundSpec(merged.appBackground)})`
             );
+          } else if (patch.bannerBackground !== undefined) {
+            setBannerMessage(
+              `Your banner style updated (${describeBackgroundSpec(merged.bannerBackground)})`
+            );
+          } else if (patch.colorMode !== undefined) {
+            setBannerMessage(`Display mode set to ${merged.colorMode}`);
           }
-          setBannerMessage('Main app interface background updated');
         } catch (err) {
-          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update app background'));
-        } finally {
-          setIsBusy(false);
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to save your personal theme'));
         }
       },
-      updateGroupBackground: async (groupId, backgroundSpec) => {
-        const isCurrentAdmin =
-          groupId === activeGroup?.id && ROLE_META[currentRole].canAccessAdminPanel;
-        const ref = joinedGroups.find((g) => g.groupId === groupId);
-        const isJoinedAdmin = ref ? ROLE_META[parseMemberRole(ref.role)].canAccessAdminPanel : false;
-        if (!isCurrentAdmin && !isJoinedAdmin) {
-          setBannerMessage('Only Admins or the Group Creator can customize group backgrounds.');
-          return;
-        }
-        setIsBusy(true);
+      resetPersonalAppearance: async () => {
+        setPersonalAppearance(DEFAULT_PERSONAL_APPEARANCE);
         try {
-          await repo.updateGroupBackground(groupId, backgroundSpec);
-          setGroupBackgroundsById((prev) => ({ ...prev, [groupId]: backgroundSpec }));
-          if (groupId === activeGroup?.id) {
-            logActivity(
-              groupId,
-              ActivityCategory.GROUP,
-              ActivityAction.GROUP_UPDATED,
-              'Updated group header background',
-              describeBackgroundSpec(backgroundSpec),
-              groupId
-            );
-          }
-          setBannerMessage('Group background updated');
+          await repo.saveUserPersonalAppearance(DEFAULT_PERSONAL_APPEARANCE);
+          setBannerMessage('Reset your personal colors and background to default');
         } catch (err) {
-          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update group background'));
-        } finally {
-          setIsBusy(false);
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to reset your personal theme'));
+        }
+      },
+      updateAppBackground: async (backgroundSpec) => {
+        const merged = sanitizePersonalAppearance({
+          ...personalAppearance,
+          appBackground: backgroundSpec,
+        });
+        setPersonalAppearance(merged);
+        try {
+          await repo.saveUserPersonalAppearance(merged);
+          setBannerMessage(
+            `Your app background updated (${describeBackgroundSpec(merged.appBackground)})`
+          );
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update your app background'));
+        }
+      },
+      updateGroupBackground: async (_groupId, backgroundSpec) => {
+        const merged = sanitizePersonalAppearance({
+          ...personalAppearance,
+          bannerBackground: backgroundSpec,
+        });
+        setPersonalAppearance(merged);
+        try {
+          await repo.saveUserPersonalAppearance(merged);
+          setBannerMessage(
+            `Your banner style updated (${describeBackgroundSpec(merged.bannerBackground)})`
+          );
+        } catch (err) {
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update your banner style'));
         }
       },
       updateGroupImage: async (groupId, groupImageUrl) => {
@@ -1256,13 +1389,13 @@ export function useRallyWorkspace(
           setIsBusy(false);
         }
       },
-      updateDisplayName: async (newDisplayName) => {
+      updateDisplayName: async (newDisplayName, newPhoneNumber) => {
         if (!activeGroup) return;
         try {
-          await repo.updateOwnDisplayName(activeGroup.id, newDisplayName);
-          setBannerMessage('Display name updated');
+          await repo.updateOwnDisplayName(activeGroup.id, newDisplayName, newPhoneNumber);
+          setBannerMessage(newPhoneNumber ? 'Contact info updated' : 'Display name updated');
         } catch (err) {
-          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update display name'));
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update contact info'));
         }
       },
       createEvent: async (title, description, location, category, startEpochMs, endEpochMs) => {
@@ -1288,6 +1421,9 @@ export function useRallyWorkspace(
             eventId
           );
           setBannerMessage(`Event '${title}' added to calendar`);
+          const optedInPhones = Object.values(memberContactsByUid)
+            .filter((c) => c.uid !== uid && c.smsEnabled && c.phoneNumber)
+            .map((c) => c.phoneNumber);
           void smsService.dispatchSmsNotification({
             groupId: activeGroup.id,
             groupName: activeGroup.name,
@@ -1295,6 +1431,7 @@ export function useRallyWorkspace(
             title: title.trim(),
             body: `${formatDateTime(startEpochMs)} @ ${location.trim()}`,
             senderName: currentUserName,
+            extraPhones: optedInPhones,
           });
           return true;
         } catch (err) {
@@ -1701,6 +1838,20 @@ export function useRallyWorkspace(
             needsApproval ? 'Pending Admin review' : `Target: ${targetChannelName ?? targetRole}`,
             notifId
           );
+          if (!needsApproval) {
+            const optedInPhones = Object.values(memberContactsByUid)
+              .filter((c) => c.uid !== uid && c.smsEnabled && c.phoneNumber)
+              .map((c) => c.phoneNumber);
+            void smsService.dispatchSmsNotification({
+              groupId: activeGroup.id,
+              groupName: activeGroup.name,
+              kind: 'event',
+              title: title.trim(),
+              body: body.trim(),
+              senderName: currentUserName,
+              extraPhones: optedInPhones,
+            });
+          }
           setBannerMessage(
             needsApproval
               ? 'Announcement submitted for Admin approval before posting'
@@ -2026,7 +2177,7 @@ export function useRallyWorkspace(
       dismissAllInAppNotifications: () => {
         setInAppNotifications([]);
       },
-      saveSmsPreferences: async (prefs) => {
+      saveSmsPreferences: async (prefs, newDisplayName) => {
         setIsBusy(true);
         try {
           const normalizedPhone = prefs.phone.trim()
@@ -2042,17 +2193,20 @@ export function useRallyWorkspace(
             forMessages: Boolean(prefs.forMessages),
             forEvents: Boolean(prefs.forEvents),
           };
-          await repo.saveUserSmsPreferences(nextPrefs);
+          await repo.saveUserSmsPreferences(nextPrefs, {
+            joinedGroupIds: joinedGroups.map((g) => g.groupId),
+            displayName: newDisplayName?.trim() || currentUserName,
+          });
           const memberships = joinedGroups.map((g) => ({
             groupId: g.groupId,
             role: g.groupId === activeGroup?.id ? currentRole : g.role,
           }));
           const syncRes = await smsService.syncSmsSubscriptionsToServer(memberships, nextPrefs);
-          setSmsServerConfigured(syncRes.configured);
+          setSmsServerStatus(syncRes);
           setBannerMessage(
             nextPrefs.enabled
-              ? `SMS notifications active for ${normalizedPhone}`
-              : 'SMS notification settings saved'
+              ? `SMS notifications active for ${smsService.formatPhoneDisplay(normalizedPhone)}`
+              : 'Contact & SMS settings saved'
           );
           return true;
         } catch (err) {
@@ -2065,18 +2219,82 @@ export function useRallyWorkspace(
       sendTestSms: async (phone) => {
         const normalizedPhone = smsService.normalizePhoneInput(phone);
         if (!smsService.E164_PHONE_REGEX.test(normalizedPhone)) {
-          setBannerMessage('Enter a valid mobile number (e.g. +15551234567) before testing.');
-          return;
+          const msg = 'Enter a valid mobile number (e.g. +15551234567) before testing.';
+          setBannerMessage(msg);
+          return { ok: false, error: msg };
         }
         setIsBusy(true);
         try {
           await smsService.sendTestSms(normalizedPhone, activeGroup?.name);
-          setBannerMessage(`Test SMS sent to ${normalizedPhone}`);
+          setSmsServerStatus((prev) => ({
+            ...prev,
+            configured: true,
+            secretsPresent: true,
+            ready: true,
+            configIssue: undefined,
+          }));
+          setBannerMessage(`Test SMS sent to ${smsService.formatPhoneDisplay(normalizedPhone)}`);
+          return { ok: true };
         } catch (err) {
-          setBannerMessage(getFriendlyErrorMessage(err, 'Could not send test SMS'));
+          const msg = getFriendlyErrorMessage(err, 'Could not send test SMS');
+          setBannerMessage(msg);
+          void smsService.fetchSmsServerStatus(true).then(setSmsServerStatus);
+          return { ok: false, error: msg };
         } finally {
           setIsBusy(false);
         }
+      },
+      sendDirectSmsBroadcast: async (phones, message) => {
+        setIsBusy(true);
+        try {
+          const res = await smsService.sendDirectCloudSms({
+            phones,
+            message,
+            groupName: activeGroup?.name ?? null,
+          });
+          if (res.sentCount > 0) {
+            setSmsServerStatus((prev) => ({
+              ...prev,
+              configured: res.configured,
+              secretsPresent: res.configured,
+              ready: true,
+              configIssue: undefined,
+            }));
+            setBannerMessage(
+              res.failedCount > 0
+                ? `Sent SMS to ${res.sentCount} number(s); ${res.failedCount} failed`
+                : `Sent SMS to ${res.sentCount} phone ${res.sentCount === 1 ? 'number' : 'numbers'}`
+            );
+          }
+          return {
+            ok: res.ok,
+            sentCount: res.sentCount,
+            failedCount: res.failedCount,
+            configured: res.configured,
+            error: res.error,
+          };
+        } catch (err) {
+          const msg = getFriendlyErrorMessage(err, 'Could not send cloud SMS');
+          setBannerMessage(msg);
+          void smsService.fetchSmsServerStatus(true).then(setSmsServerStatus);
+          return {
+            ok: false,
+            sentCount: 0,
+            failedCount: phones.length,
+            configured: smsServerConfigured,
+            error: msg,
+          };
+        } finally {
+          setIsBusy(false);
+        }
+      },
+      refreshSmsServerStatus: async () => {
+        const next = await smsService.fetchSmsServerStatus(true);
+        setSmsServerStatus(next);
+        return next;
+      },
+      requestGoogleSignIn: () => {
+        onRequestGoogleSignIn?.();
       },
       exportAuditLogCsv: async (options) => {
         if (!activeGroup) return 0;
@@ -2119,7 +2337,7 @@ export function useRallyWorkspace(
         const members =
           membersOverride ??
           (normalizedMembersState.status === 'success' ? normalizedMembersState.data : []);
-        const csv = buildGroupMembersCsv(members, activeGroup);
+        const csv = buildGroupMembersCsv(members, activeGroup, memberContactsByUid);
         const filename = makeDatedCsvFilename(activeGroup.name, 'members');
         downloadCsvFile(filename, csv);
         setBannerMessage(
@@ -2140,7 +2358,12 @@ export function useRallyWorkspace(
           const fullLogs = await repo.fetchActivityLogsForExport(activeGroup.id);
           const combined = combineAuditLogsWithOrigin(fullLogs, activeGroup, members);
           const auditRows = filterAndSortAuditLogs(combined, 'SENSITIVE', '', 'desc');
-          const csv = buildCombinedRecordKeepingCsv(members, auditRows, activeGroup);
+          const csv = buildCombinedRecordKeepingCsv(
+            members,
+            auditRows,
+            activeGroup,
+            memberContactsByUid
+          );
           const filename = makeDatedCsvFilename(activeGroup.name, 'records-combined');
           downloadCsvFile(filename, csv);
           setBannerMessage(
@@ -2174,10 +2397,14 @@ export function useRallyWorkspace(
       joinGroupByCode,
       joinedGroups,
       logActivity,
+      memberContactsByUid,
       normalizedMembersState,
       notificationsState,
+      onRequestGoogleSignIn,
+      personalAppearance,
       remindedTimes,
       selectedGroupId,
+      smsServerConfigured,
       switchGroup,
       uid,
     ]
@@ -2185,9 +2412,10 @@ export function useRallyWorkspace(
 
   const state: RallyWorkspaceState = {
     isCloudMode: true,
+    isGuest,
     currentUserId: uid,
     currentUserName,
-    currentUserEmail: user.email ?? null,
+    currentUserEmail: identity.email ?? null,
     activeGroup,
     currentRole,
     joinedGroups,
@@ -2201,14 +2429,18 @@ export function useRallyWorkspace(
     notificationsState,
     activityLogsState,
     membersState: normalizedMembersState,
+    memberContactsByUid,
     analytics,
     remindedTimes,
     inAppNotifications,
+    personalAppearance,
     appBackground,
     groupBackgroundsById,
     groupImagesById,
     smsPreferences,
+    smsPrefsLoaded,
     smsServerConfigured,
+    smsServerStatus,
     bannerMessage,
     isBusy,
   };

@@ -1,5 +1,6 @@
 import express from 'express';
 import type { Request, Response } from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,8 @@ const AI_MODEL_NAME = 'gemini-4-hydrogen';
 const SMS_DATA_DIR = path.resolve(__dirname, '.data');
 const SMS_SUBS_FILE = path.join(SMS_DATA_DIR, 'sms-subscriptions.json');
 const E164_PHONE_REGEX = /^\+[1-9]\d{7,14}$/;
+const TWILIO_ACCOUNT_SID_REGEX = /^AC[a-fA-F0-9]{32}$/;
+const TWILIO_MESSAGING_SERVICE_SID_REGEX = /^MG[a-fA-F0-9]{32}$/;
 
 interface SmsSubscriberRecord {
   phone: string;
@@ -23,17 +26,83 @@ interface SmsSubscriberRecord {
 
 type SmsSubscriptionStore = Record<string, Record<string, SmsSubscriberRecord>>;
 
-function loadFirebaseWebApiKey(): string {
+function loadFirebaseAppletConfig(): { apiKey: string; projectId: string } {
   try {
     const raw = fs.readFileSync(path.resolve(__dirname, 'firebase-applet-config.json'), 'utf-8');
-    const parsed = JSON.parse(raw) as { apiKey?: string };
-    return parsed.apiKey ?? '';
+    const parsed = JSON.parse(raw) as { apiKey?: string; projectId?: string };
+    return {
+      apiKey: (parsed.apiKey ?? '').trim(),
+      projectId: (parsed.projectId ?? '').trim(),
+    };
   } catch {
-    return '';
+    return { apiKey: '', projectId: '' };
   }
 }
 
-const FIREBASE_WEB_API_KEY = loadFirebaseWebApiKey();
+const FIREBASE_APPLET_CONFIG = loadFirebaseAppletConfig();
+const FIREBASE_WEB_API_KEY = FIREBASE_APPLET_CONFIG.apiKey;
+const FIREBASE_PROJECT_ID = FIREBASE_APPLET_CONFIG.projectId;
+
+let cachedGoogleCerts: { certs: Record<string, string>; expiresAt: number } | null = null;
+
+async function getGooglePublicCerts(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (cachedGoogleCerts && cachedGoogleCerts.expiresAt > now) {
+    return cachedGoogleCerts.certs;
+  }
+  const resp = await fetch(
+    'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch Firebase public certs (${resp.status})`);
+  }
+  const certs = (await resp.json()) as Record<string, string>;
+  cachedGoogleCerts = {
+    certs,
+    expiresAt: now + 30 * 60 * 1000,
+  };
+  return certs;
+}
+
+async function verifyFirebaseJwtFallback(idToken: string): Promise<string | null> {
+  if (!FIREBASE_PROJECT_ID) return null;
+  try {
+    const parts = idToken.split('.');
+    if (parts.length !== 3) return null;
+    const [headerB64, payloadB64, signatureB64] = parts;
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8')) as {
+      alg?: string;
+      kid?: string;
+    };
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8')) as {
+      aud?: string;
+      iss?: string;
+      sub?: string;
+      exp?: number;
+    };
+    if (header.alg !== 'RS256' || !header.kid) return null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (
+      payload.aud !== FIREBASE_PROJECT_ID ||
+      payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}` ||
+      !payload.sub ||
+      typeof payload.exp !== 'number' ||
+      payload.exp <= nowSec
+    ) {
+      return null;
+    }
+    const certs = await getGooglePublicCerts();
+    const cert = certs[header.kid];
+    if (!cert) return null;
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(`${headerB64}.${payloadB64}`);
+    verifier.end();
+    const valid = verifier.verify(cert, Buffer.from(signatureB64, 'base64url'));
+    return valid ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
 
 function loadSmsSubscriptions(): SmsSubscriptionStore {
   try {
@@ -57,34 +126,333 @@ function saveSmsSubscriptions(store: SmsSubscriptionStore): void {
   }
 }
 
-function getTwilioConfig(): { accountSid: string; authToken: string; fromNumber: string } | null {
-  const accountSid = (process.env.TWILIO_ACCOUNT_SID ?? '').trim();
-  const authToken = (process.env.TWILIO_AUTH_TOKEN ?? '').trim();
-  const fromNumber = (process.env.TWILIO_FROM_NUMBER ?? '').trim();
-  if (!accountSid || !authToken || !fromNumber) return null;
-  return { accountSid, authToken, fromNumber };
+function cleanSecretValue(raw: string | undefined, envKeyName: string): string {
+  let val = (raw ?? '').trim();
+  if (!val) return '';
+  const keyPrefix = new RegExp(`^(?:export\\s+)?${envKeyName}\\s*=\\s*`, 'i');
+  val = val.replace(keyPrefix, '').trim();
+  if (
+    (val.startsWith('"') && val.endsWith('"')) ||
+    (val.startsWith("'") && val.endsWith("'")) ||
+    (val.startsWith('`') && val.endsWith('`'))
+  ) {
+    val = val.slice(1, -1).trim();
+  }
+  return val;
+}
+
+function normalizeServerPhoneInput(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const digitsOnly = trimmed.replace(/[^\d+]/g, '');
+  if (digitsOnly.startsWith('+')) {
+    return `+${digitsOnly.slice(1).replace(/\+/g, '').slice(0, 15)}`;
+  }
+  const plainDigits = digitsOnly.replace(/\+/g, '');
+  if (plainDigits.length === 10) {
+    return `+1${plainDigits}`;
+  }
+  if (plainDigits.length === 11 && plainDigits.startsWith('1')) {
+    return `+${plainDigits}`;
+  }
+  if (plainDigits.length >= 8 && plainDigits.length <= 15) {
+    return `+${plainDigits}`;
+  }
+  return plainDigits ? `+${plainDigits.slice(0, 15)}` : '';
+}
+
+interface ParsedTwilioConfig {
+  secretsPresent: boolean;
+  accountSid: string;
+  authToken: string;
+  senderValue: string;
+  senderType: 'phone' | 'messaging_service' | 'invalid' | 'missing';
+  senderDisplay: string;
+  formatIssue?: string;
+}
+
+function parseTwilioConfig(): ParsedTwilioConfig {
+  let rawSid = cleanSecretValue(process.env.TWILIO_ACCOUNT_SID, 'TWILIO_ACCOUNT_SID').replace(
+    /\s+/g,
+    ''
+  );
+  let rawToken = cleanSecretValue(process.env.TWILIO_AUTH_TOKEN, 'TWILIO_AUTH_TOKEN').replace(
+    /\s+/g,
+    ''
+  );
+  const rawFrom = cleanSecretValue(process.env.TWILIO_FROM_NUMBER, 'TWILIO_FROM_NUMBER');
+  const rawMsgSid = cleanSecretValue(
+    process.env.TWILIO_MESSAGING_SERVICE_SID,
+    'TWILIO_MESSAGING_SERVICE_SID'
+  ).replace(/\s+/g, '');
+
+  const secretsPresent = Boolean(rawSid || rawToken || rawFrom || rawMsgSid);
+  if (!secretsPresent) {
+    return {
+      secretsPresent: false,
+      accountSid: '',
+      authToken: '',
+      senderValue: '',
+      senderType: 'missing',
+      senderDisplay: '',
+    };
+  }
+
+  // Extract embedded AC... if pasted inside larger snippet
+  const embeddedAcInSid = /(AC[a-fA-F0-9]{32})/.exec(rawSid);
+  if (embeddedAcInSid) {
+    rawSid = embeddedAcInSid[1];
+  }
+
+  // Auto-heal if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN were swapped
+  if (!TWILIO_ACCOUNT_SID_REGEX.test(rawSid) && TWILIO_ACCOUNT_SID_REGEX.test(rawToken)) {
+    const tmp = rawSid;
+    rawSid = rawToken;
+    rawToken = tmp;
+  }
+
+  // Determine sender (Messaging Service SID MG... or E.164 phone number)
+  const cleanFromCompact = rawFrom.replace(/\s+/g, '');
+  let senderValue = '';
+  let senderType: ParsedTwilioConfig['senderType'] = 'missing';
+  let senderDisplay = '';
+
+  if (TWILIO_MESSAGING_SERVICE_SID_REGEX.test(rawMsgSid)) {
+    senderValue = rawMsgSid;
+    senderType = 'messaging_service';
+    senderDisplay = `Messaging Service (${rawMsgSid.slice(0, 6)}…${rawMsgSid.slice(-4)})`;
+  } else if (TWILIO_MESSAGING_SERVICE_SID_REGEX.test(cleanFromCompact)) {
+    senderValue = cleanFromCompact;
+    senderType = 'messaging_service';
+    senderDisplay = `Messaging Service (${cleanFromCompact.slice(0, 6)}…${cleanFromCompact.slice(-4)})`;
+  } else if (rawFrom) {
+    const normalizedFrom = normalizeServerPhoneInput(rawFrom);
+    if (E164_PHONE_REGEX.test(normalizedFrom)) {
+      senderValue = normalizedFrom;
+      senderType = 'phone';
+      senderDisplay =
+        normalizedFrom.length >= 8
+          ? `${normalizedFrom.slice(0, 2)} ***-***-${normalizedFrom.slice(-4)}`
+          : normalizedFrom;
+    } else {
+      senderValue = rawFrom;
+      senderType = 'invalid';
+    }
+  }
+
+  const missingVars: string[] = [];
+  if (!rawSid) missingVars.push('TWILIO_ACCOUNT_SID');
+  if (!rawToken) missingVars.push('TWILIO_AUTH_TOKEN');
+  if (!rawFrom && !rawMsgSid) missingVars.push('TWILIO_FROM_NUMBER');
+
+  let formatIssue: string | undefined;
+  if (missingVars.length > 0) {
+    formatIssue = `Missing ${missingVars.join(', ')} in AI Studio Settings > Secrets.`;
+  } else if (/^SK[a-fA-F0-9]{32}$/i.test(rawSid)) {
+    formatIssue =
+      'TWILIO_ACCOUNT_SID in Settings > Secrets is set to an API Key SID (starts with "SK…"). Twilio requires your main 34-character Account SID (starts with "AC…") from the Twilio Console Account Info panel.';
+  } else if (/^(MG|VA|PN|IS|US)[a-fA-F0-9]{32}$/i.test(rawSid)) {
+    const prefix = rawSid.slice(0, 2).toUpperCase();
+    formatIssue = `TWILIO_ACCOUNT_SID in Settings > Secrets starts with "${prefix}…" instead of "AC…". Copy your 34-character Account SID (starting with "AC") from the Twilio Console dashboard.`;
+  } else if (rawSid.includes('@')) {
+    formatIssue =
+      'TWILIO_ACCOUNT_SID in Settings > Secrets contains an email address instead of your Twilio Account SID. Copy the 34-character Account SID (starting with "AC…") from the Twilio Console dashboard.';
+  } else if (/^\+?\d{7,15}$/.test(rawSid)) {
+    formatIssue =
+      'TWILIO_ACCOUNT_SID in Settings > Secrets contains a phone number instead of your Account SID. Put your Twilio phone number in TWILIO_FROM_NUMBER and your "AC…" Account SID in TWILIO_ACCOUNT_SID.';
+  } else if (!TWILIO_ACCOUNT_SID_REGEX.test(rawSid)) {
+    formatIssue = `TWILIO_ACCOUNT_SID in Settings > Secrets is not a valid 34-character Twilio Account SID (must start with "AC" followed by 32 hex characters; current length is ${rawSid.length}). Update it in Settings > Secrets and restart.`;
+  } else if (senderType === 'invalid') {
+    formatIssue =
+      'TWILIO_FROM_NUMBER in Settings > Secrets is not a valid phone number or Messaging Service SID. Set it to your Twilio number in E.164 format (e.g. +18551234567) or a Messaging Service SID (MG…).';
+  }
+
+  return {
+    secretsPresent,
+    accountSid: rawSid,
+    authToken: rawToken,
+    senderValue,
+    senderType,
+    senderDisplay,
+    formatIssue,
+  };
+}
+
+function formatActionableTwilioError(
+  rawMessage: string | undefined,
+  code: number | undefined,
+  status: number,
+  parsedCfg: ParsedTwilioConfig
+): string {
+  if (parsedCfg.formatIssue) {
+    return parsedCfg.formatIssue;
+  }
+  const msg = (rawMessage ?? '').trim();
+  const lower = msg.toLowerCase();
+
+  if (
+    code === 20003 ||
+    status === 401 ||
+    lower.includes('authentication error') ||
+    lower.includes('invalid username') ||
+    lower.includes('authenticate')
+  ) {
+    return 'Twilio rejected TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN ("Authentication Error"). In AI Studio Settings > Secrets, verify TWILIO_ACCOUNT_SID is your active "AC…" Account SID and TWILIO_AUTH_TOKEN is your current Auth Token from console.twilio.com.';
+  }
+  if (code === 21608 || lower.includes('unverified')) {
+    return `Twilio Trial Account restriction: ${msg} Verify the recipient phone number under Twilio Console > Phone Numbers > Verified Caller IDs, or upgrade your Twilio account to text any number.`;
+  }
+  if (code === 21211) {
+    return `Invalid recipient phone number: ${msg}`;
+  }
+  if (code === 21212 || code === 21606 || lower.includes("'from' number")) {
+    return `Invalid TWILIO_FROM_NUMBER in Settings > Secrets: ${msg} Make sure TWILIO_FROM_NUMBER matches an active SMS-capable Twilio phone number on your Twilio account (e.g. +18551234567).`;
+  }
+  if (code === 21610) {
+    return 'Recipient has opted out of SMS from this Twilio number (replied STOP). They must text START to your Twilio number to re-enable messages.';
+  }
+  return msg || `Twilio API error (${status})`;
+}
+
+interface SmsHealthStatus {
+  configured: boolean;
+  secretsPresent: boolean;
+  ready: boolean;
+  accountType?: string;
+  senderDisplay?: string;
+  configIssue?: string;
+}
+
+let cachedSmsHealth: { key: string; value: SmsHealthStatus; expiresAt: number } | null = null;
+
+async function checkTwilioHealth(force = false): Promise<SmsHealthStatus> {
+  const cfg = parseTwilioConfig();
+  if (!cfg.secretsPresent) {
+    return {
+      configured: false,
+      secretsPresent: false,
+      ready: false,
+    };
+  }
+  if (cfg.formatIssue) {
+    return {
+      configured: true,
+      secretsPresent: true,
+      ready: false,
+      senderDisplay: cfg.senderDisplay || undefined,
+      configIssue: cfg.formatIssue,
+    };
+  }
+
+  const cacheKey = `${cfg.accountSid}:${cfg.authToken.slice(0, 4)}:${cfg.senderValue}`;
+  const now = Date.now();
+  if (!force && cachedSmsHealth && cachedSmsHealth.key === cacheKey && cachedSmsHealth.expiresAt > now) {
+    return cachedSmsHealth.value;
+  }
+
+  try {
+    const credentials = Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString('base64');
+    const resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(cfg.accountSid)}.json`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Basic ${credentials}`,
+        },
+      }
+    );
+    const payload = (await resp.json().catch(() => ({}))) as {
+      status?: string;
+      type?: string;
+      message?: string;
+      code?: number;
+    };
+
+    if (!resp.ok) {
+      const issue = formatActionableTwilioError(payload.message, payload.code, resp.status, cfg);
+      const result: SmsHealthStatus = {
+        configured: true,
+        secretsPresent: true,
+        ready: false,
+        senderDisplay: cfg.senderDisplay || undefined,
+        configIssue: issue,
+      };
+      cachedSmsHealth = { key: cacheKey, value: result, expiresAt: now + 15_000 };
+      return result;
+    }
+
+    if (payload.status && payload.status.toLowerCase() !== 'active') {
+      const result: SmsHealthStatus = {
+        configured: true,
+        secretsPresent: true,
+        ready: false,
+        accountType: payload.type,
+        senderDisplay: cfg.senderDisplay || undefined,
+        configIssue: `Your Twilio account status is "${payload.status}". Activate your Twilio account at console.twilio.com to send Cloud SMS.`,
+      };
+      cachedSmsHealth = { key: cacheKey, value: result, expiresAt: now + 15_000 };
+      return result;
+    }
+
+    const result: SmsHealthStatus = {
+      configured: true,
+      secretsPresent: true,
+      ready: true,
+      accountType: payload.type,
+      senderDisplay: cfg.senderDisplay || undefined,
+    };
+    cachedSmsHealth = { key: cacheKey, value: result, expiresAt: now + 60_000 };
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      configured: true,
+      secretsPresent: true,
+      ready: false,
+      senderDisplay: cfg.senderDisplay || undefined,
+      configIssue: `Could not reach Twilio API (${msg}). Check network connectivity or retry.`,
+    };
+  }
 }
 
 async function verifyFirebaseBearerUid(req: Request): Promise<string | null> {
   const authHeader = req.headers.authorization ?? '';
   const match = /^Bearer\s+(.+)$/i.exec(authHeader);
   const idToken = match?.[1]?.trim();
-  if (!idToken || !FIREBASE_WEB_API_KEY) return null;
-  try {
-    const resp = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
+  if (!idToken) return null;
+
+  if (FIREBASE_WEB_API_KEY) {
+    try {
+      const resp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        }
+      );
+      if (resp.ok) {
+        const data = (await resp.json()) as { users?: Array<{ localId?: string }> };
+        const uid = data.users?.[0]?.localId ?? null;
+        if (uid) return uid;
       }
-    );
-    if (!resp.ok) return null;
-    const data = (await resp.json()) as { users?: Array<{ localId?: string }> };
-    return data.users?.[0]?.localId ?? null;
-  } catch {
-    return null;
+    } catch {
+      // Fall through to cryptographic JWT verification
+    }
   }
+
+  return verifyFirebaseJwtFallback(idToken);
+}
+
+async function verifySmsActorUid(req: Request): Promise<string | null> {
+  const firebaseUid = await verifyFirebaseBearerUid(req);
+  if (firebaseUid) return firebaseUid;
+  const guestHeader = req.headers['x-guest-uid'];
+  const guestUid = typeof guestHeader === 'string' ? guestHeader.trim() : '';
+  if (/^guest_[a-zA-Z0-9]{16,40}$/.test(guestUid)) {
+    return guestUid;
+  }
+  return null;
 }
 
 function roleCanAccessChannelLevel(role: string, channelAccessLevel?: string): boolean {
@@ -101,35 +469,68 @@ function roleCanAccessChannelLevel(role: string, channelAccessLevel?: string): b
 }
 
 async function sendTwilioSms(to: string, body: string): Promise<{ ok: boolean; sid?: string; error?: string }> {
-  const cfg = getTwilioConfig();
-  if (!cfg) {
+  const cfg = parseTwilioConfig();
+  if (!cfg.secretsPresent) {
     return {
       ok: false,
-      error: 'Twilio SMS credentials (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER) are not configured on the server.',
+      error:
+        'Twilio SMS credentials (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER) are not configured on the server.',
     };
   }
+  if (cfg.formatIssue) {
+    return {
+      ok: false,
+      error: cfg.formatIssue,
+    };
+  }
+
+  const normalizedTo = normalizeServerPhoneInput(to);
+  if (!E164_PHONE_REGEX.test(normalizedTo)) {
+    return {
+      ok: false,
+      error: `Recipient number "${to}" is not a valid E.164 phone number.`,
+    };
+  }
+
   const params = new URLSearchParams({
-    To: to,
-    From: cfg.fromNumber,
+    To: normalizedTo,
     Body: body.slice(0, 1400),
   });
-  const credentials = Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString('base64');
-  const resp = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(cfg.accountSid)}/Messages.json`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${credentials}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: params.toString(),
-    }
-  );
-  const payload = (await resp.json().catch(() => ({}))) as { sid?: string; message?: string };
-  if (!resp.ok) {
-    return { ok: false, error: payload.message || `Twilio API error (${resp.status})` };
+  if (cfg.senderType === 'messaging_service') {
+    params.set('MessagingServiceSid', cfg.senderValue);
+  } else {
+    params.set('From', cfg.senderValue);
   }
-  return { ok: true, sid: payload.sid };
+
+  try {
+    const credentials = Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString('base64');
+    const resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(cfg.accountSid)}/Messages.json`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${credentials}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: params.toString(),
+      }
+    );
+    const payload = (await resp.json().catch(() => ({}))) as {
+      sid?: string;
+      message?: string;
+      code?: number;
+    };
+    if (!resp.ok) {
+      return {
+        ok: false,
+        error: formatActionableTwilioError(payload.message, payload.code, resp.status, cfg),
+      };
+    }
+    return { ok: true, sid: payload.sid };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Unable to reach Twilio API: ${msg}` };
+  }
 }
 
 function createAiClient(): GoogleGenAI {
@@ -172,14 +573,16 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  app.get('/api/sms/status', (_req: Request, res: Response) => {
-    res.json({ configured: getTwilioConfig() !== null });
+  app.get('/api/sms/status', async (req: Request, res: Response) => {
+    const force = req.query.refresh === '1';
+    const health = await checkTwilioHealth(force);
+    res.json(health);
   });
 
   app.post('/api/sms/subscriptions', async (req: Request, res: Response) => {
-    const uid = await verifyFirebaseBearerUid(req);
+    const uid = await verifySmsActorUid(req);
     if (!uid) {
-      res.status(401).json({ error: 'Valid Firebase authentication token is required.' });
+      res.status(401).json({ error: 'Valid session authentication is required.' });
       return;
     }
 
@@ -191,14 +594,13 @@ async function startServer() {
       forEvents?: boolean;
     };
 
-    const cleanPhone = (phone ?? '').trim();
+    const cleanPhone = phone ? normalizeServerPhoneInput(phone) : '';
     if (enabled && !E164_PHONE_REGEX.test(cleanPhone)) {
       res.status(400).json({ error: 'Enter a valid E.164 phone number (e.g. +15551234567).' });
       return;
     }
 
     const store = loadSmsSubscriptions();
-    // Clear existing entries for uid so deactivated groups stay clean
     for (const grpId of Object.keys(store)) {
       if (store[grpId]?.[uid]) {
         delete store[grpId][uid];
@@ -221,29 +623,32 @@ async function startServer() {
     }
 
     saveSmsSubscriptions(store);
-    res.json({ ok: true, configured: getTwilioConfig() !== null });
+    const health = await checkTwilioHealth(false);
+    res.json({ ok: true, ...health });
   });
 
   app.post('/api/sms/test', async (req: Request, res: Response) => {
-    const uid = await verifyFirebaseBearerUid(req);
+    const uid = await verifySmsActorUid(req);
     if (!uid) {
-      res.status(401).json({ error: 'Valid Firebase authentication token is required.' });
+      res.status(401).json({ error: 'Valid session authentication is required.' });
       return;
     }
 
     const { phone, groupName } = req.body as { phone?: string; groupName?: string };
-    const cleanPhone = (phone ?? '').trim();
+    const cleanPhone = phone ? normalizeServerPhoneInput(phone) : '';
     if (!E164_PHONE_REGEX.test(cleanPhone)) {
       res.status(400).json({ error: 'Enter a valid E.164 phone number (e.g. +15551234567).' });
       return;
     }
 
-    const cfg = getTwilioConfig();
-    if (!cfg) {
+    const cfg = parseTwilioConfig();
+    if (!cfg.secretsPresent) {
       res.status(503).json({
         configured: false,
+        secretsPresent: false,
+        ready: false,
         error:
-          'Twilio SMS credentials (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER) are not configured on the server.',
+          'Twilio SMS credentials (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER) are not configured on the server. Use "Test via SMS App" to send via your phone.',
       });
       return;
     }
@@ -253,28 +658,128 @@ async function startServer() {
       `RallyHub SMS alerts are active${groupName ? ` for ${groupName}` : ''}! You will receive text updates for messages and events based on your preferences.`
     );
     if (!result.ok) {
-      res.status(502).json({ configured: true, error: result.error });
+      res.status(502).json({
+        configured: true,
+        secretsPresent: true,
+        ready: false,
+        error: result.error,
+      });
       return;
     }
-    res.json({ ok: true, configured: true, sid: result.sid });
+    res.json({ ok: true, configured: true, secretsPresent: true, ready: true, sid: result.sid });
+  });
+
+  app.post('/api/sms/send', async (req: Request, res: Response) => {
+    const senderUid = await verifySmsActorUid(req);
+    if (!senderUid) {
+      res.status(401).json({ error: 'Sign in or join a group before sending SMS broadcasts.' });
+      return;
+    }
+
+    const { phones, message, groupName } = req.body as {
+      phones?: unknown;
+      message?: string;
+      groupName?: string;
+    };
+
+    const trimmedMsg = (message ?? '').trim();
+    if (!trimmedMsg) {
+      res.status(400).json({ error: 'SMS message body is required.' });
+      return;
+    }
+
+    const rawList = Array.isArray(phones) ? phones : [];
+    const uniquePhones = Array.from(
+      new Set(
+        rawList
+          .filter((p): p is string => typeof p === 'string')
+          .map((p) => normalizeServerPhoneInput(p))
+          .filter((p) => E164_PHONE_REGEX.test(p))
+      )
+    ).slice(0, 250);
+
+    if (uniquePhones.length === 0) {
+      res.status(400).json({ error: 'Provide at least one valid phone number (e.g. +15551234567).' });
+      return;
+    }
+
+    const cfg = parseTwilioConfig();
+    if (!cfg.secretsPresent) {
+      res.status(503).json({
+        ok: false,
+        configured: false,
+        secretsPresent: false,
+        ready: false,
+        error:
+          'Server carrier SMS (Twilio) is not configured. Tap "Open in SMS App" to send this text directly from your phone or Messages app.',
+      });
+      return;
+    }
+
+    const prefix = groupName?.trim() ? `[${groupName.trim()}] ` : '';
+    const fullBody = (
+      trimmedMsg.startsWith('[') ? trimmedMsg : `${prefix}${trimmedMsg}`
+    ).slice(0, 1200);
+
+    const results = await Promise.allSettled(
+      uniquePhones.map((to) => sendTwilioSms(to, fullBody))
+    );
+
+    let sentCount = 0;
+    let firstError: string | undefined;
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.ok) {
+        sentCount += 1;
+      } else if (r.status === 'fulfilled' && !r.value.ok && !firstError) {
+        firstError = r.value.error;
+      } else if (r.status === 'rejected' && !firstError) {
+        firstError = String(r.reason);
+      }
+    }
+
+    const failedCount = uniquePhones.length - sentCount;
+    if (sentCount === 0 && firstError) {
+      res.status(502).json({
+        ok: false,
+        configured: true,
+        secretsPresent: true,
+        ready: false,
+        sentCount: 0,
+        failedCount,
+        error: firstError,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      configured: true,
+      secretsPresent: true,
+      ready: true,
+      sentCount,
+      failedCount,
+      error: firstError,
+    });
   });
 
   app.post('/api/sms/dispatch', async (req: Request, res: Response) => {
-    const senderUid = await verifyFirebaseBearerUid(req);
+    const senderUid = await verifySmsActorUid(req);
     if (!senderUid) {
-      res.status(401).json({ error: 'Valid Firebase authentication token is required.' });
+      res.status(401).json({ error: 'Valid session authentication is required.' });
       return;
     }
 
-    const { groupId, groupName, kind, title, body, senderName, channelAccessLevel } = req.body as {
-      groupId?: string;
-      groupName?: string;
-      kind?: 'message' | 'event';
-      title?: string;
-      body?: string;
-      senderName?: string;
-      channelAccessLevel?: string;
-    };
+    const { groupId, groupName, kind, title, body, senderName, channelAccessLevel, extraPhones } =
+      req.body as {
+        groupId?: string;
+        groupName?: string;
+        kind?: 'message' | 'event';
+        title?: string;
+        body?: string;
+        senderName?: string;
+        channelAccessLevel?: string;
+        extraPhones?: string[];
+      };
 
     if (!groupId || (kind !== 'message' && kind !== 'event') || !title?.trim() || !body?.trim()) {
       res.status(400).json({ error: 'groupId, kind, title, and body are required.' });
@@ -283,7 +788,8 @@ async function startServer() {
 
     const store = loadSmsSubscriptions();
     const groupSubs = store[groupId] ?? {};
-    const recipients: SmsSubscriberRecord[] = [];
+    const targetPhones = new Set<string>();
+
     for (const [subUid, rec] of Object.entries(groupSubs)) {
       if (subUid === senderUid) continue;
       if (kind === 'message') {
@@ -292,12 +798,32 @@ async function startServer() {
       } else if (!rec.forEvents) {
         continue;
       }
-      recipients.push(rec);
+      const normSubPhone = normalizeServerPhoneInput(rec.phone);
+      if (E164_PHONE_REGEX.test(normSubPhone)) {
+        targetPhones.add(normSubPhone);
+      }
     }
 
-    const configured = getTwilioConfig() !== null;
-    if (recipients.length === 0 || !configured) {
-      res.json({ ok: true, configured, eligibleCount: recipients.length, sentCount: 0 });
+    if (Array.isArray(extraPhones)) {
+      for (const rawPhone of extraPhones.slice(0, 250)) {
+        if (typeof rawPhone === 'string') {
+          const normExtra = normalizeServerPhoneInput(rawPhone);
+          if (E164_PHONE_REGEX.test(normExtra)) {
+            targetPhones.add(normExtra);
+          }
+        }
+      }
+    }
+
+    const phoneList = Array.from(targetPhones);
+    const cfg = parseTwilioConfig();
+    if (phoneList.length === 0 || !cfg.secretsPresent) {
+      res.json({
+        ok: true,
+        configured: cfg.secretsPresent,
+        eligibleCount: phoneList.length,
+        sentCount: 0,
+      });
       return;
     }
 
@@ -305,17 +831,26 @@ async function startServer() {
     const smsText = `${prefix}${title.trim()}: ${body.trim()}${senderName ? ` — ${senderName.trim()}` : ''}`.slice(0, 320);
 
     const results = await Promise.allSettled(
-      recipients.map((rec) => sendTwilioSms(rec.phone, smsText))
+      phoneList.map((phone) => sendTwilioSms(phone, smsText))
     );
-    const sentCount = results.filter(
-      (r) => r.status === 'fulfilled' && r.value.ok
-    ).length;
+    let sentCount = 0;
+    let firstError: string | undefined;
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.ok) {
+        sentCount += 1;
+      } else if (r.status === 'fulfilled' && !r.value.ok && !firstError) {
+        firstError = r.value.error;
+      } else if (r.status === 'rejected' && !firstError) {
+        firstError = String(r.reason);
+      }
+    }
 
     res.json({
-      ok: true,
-      configured,
-      eligibleCount: recipients.length,
+      ok: sentCount > 0 || !firstError,
+      configured: true,
+      eligibleCount: phoneList.length,
       sentCount,
+      error: firstError,
     });
   });
 

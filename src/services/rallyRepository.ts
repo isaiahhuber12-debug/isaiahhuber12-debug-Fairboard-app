@@ -20,10 +20,28 @@ import {
   writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { isValidBackgroundSpec } from '../lib/backgrounds';
+import {
+  isValidBackgroundSpec,
+  isValidColorMode,
+  isValidColorTheme,
+  type PersonalAppearance,
+  readStoredPersonalAppearance,
+  sanitizePersonalAppearance,
+  subscribeStoredPersonalAppearance,
+  writeStoredPersonalAppearance,
+} from '../lib/backgrounds';
 import { isValidGroupImageUrl, normalizeGroupImageInput } from '../lib/groupImages';
 import { auth, db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firestoreError';
+import {
+  getStoredGuestSession,
+  isGuestUid,
+  removeGuestJoinedGroup,
+  subscribeGuestSession,
+  updateGuestProfile,
+  upsertGuestJoinedGroup,
+} from '../lib/guestSession';
+import { E164_PHONE_REGEX, normalizePhoneInput } from './smsService';
 import {
   ActivityAction,
   ActivityCategory,
@@ -37,6 +55,7 @@ import {
   type GroupMember,
   type HubNotification,
   type JoinedGroupRef,
+  type MemberContactInfo,
   MemberRole,
   MessageType,
   NotificationType,
@@ -74,9 +93,17 @@ function optionalTsToMs(val: unknown): number | null {
 }
 
 function requireUserId(): string {
+  const uid = auth.currentUser?.uid ?? getStoredGuestSession()?.uid;
+  if (!uid) {
+    throw new Error('Join a group with a code or sign in with Google first.');
+  }
+  return uid;
+}
+
+function requireGoogleUserId(): string {
   const uid = auth.currentUser?.uid;
   if (!uid) {
-    throw new Error('Google Sign-In required before accessing cloud data.');
+    throw new Error('Sign in with Google to create or manage groups.');
   }
   return uid;
 }
@@ -113,8 +140,12 @@ export async function ensureUserProfile(): Promise<void> {
       }
       await setDoc(docRef, payload);
     } else {
+      const existingName =
+        typeof snap.data().displayName === 'string' && snap.data().displayName.trim()
+          ? snap.data().displayName.trim()
+          : displayName;
       await updateDoc(docRef, {
-        displayName,
+        displayName: existingName.slice(0, 60),
         email,
         updatedAt: serverTimestamp(),
       });
@@ -129,6 +160,14 @@ export function subscribeUserSmsPreferences(
   onData: (prefs: SmsPreferences) => void,
   onError: (err: unknown) => void
 ): Unsubscribe {
+  if (!auth.currentUser && isGuestUid(uid)) {
+    const cur = getStoredGuestSession();
+    onData(cur?.smsPreferences ?? DEFAULT_SMS_PREFERENCES);
+    return subscribeGuestSession((session) => {
+      onData(session?.smsPreferences ?? DEFAULT_SMS_PREFERENCES);
+    });
+  }
+
   const path = `users/${uid}`;
   return onSnapshot(
     doc(db, 'users', uid),
@@ -155,44 +194,218 @@ export function subscribeUserSmsPreferences(
   );
 }
 
-export async function saveUserSmsPreferences(prefs: SmsPreferences): Promise<void> {
+export async function upsertMemberContact(
+  groupId: string,
+  params: {
+    uid: string;
+    displayName: string;
+    phoneNumber: string;
+    email?: string | null;
+    authMethod: 'GOOGLE' | 'CODE_GUEST';
+    smsEnabled: boolean;
+  }
+): Promise<void> {
+  const cleanPhone = normalizePhoneInput(params.phoneNumber);
+  if (!E164_PHONE_REGEX.test(cleanPhone)) return;
+
+  const payload: Record<string, unknown> = {
+    uid: params.uid,
+    displayName: (params.displayName.trim() || 'Member').slice(0, 60),
+    phoneNumber: cleanPhone,
+    authMethod: params.authMethod,
+    smsEnabled: Boolean(params.smsEnabled),
+    updatedAt: serverTimestamp(),
+  };
+  if (params.authMethod === 'GOOGLE' && params.email && params.email.trim().length >= 3) {
+    payload.email = params.email.trim().slice(0, 160);
+  }
+  await setDoc(doc(db, 'groups', groupId, 'memberContacts', params.uid), payload);
+}
+
+export function subscribeMemberContacts(
+  groupId: string,
+  onData: (contactsByUid: Record<string, MemberContactInfo>) => void,
+  onError: (err: unknown) => void
+): Unsubscribe {
+  const path = `groups/${groupId}/memberContacts`;
+  return onSnapshot(
+    collection(db, 'groups', groupId, 'memberContacts'),
+    (snap) => {
+      const map: Record<string, MemberContactInfo> = {};
+      for (const d of snap.docs) {
+        const data = d.data();
+        const uid = String(data.uid ?? d.id);
+        map[uid] = {
+          uid,
+          displayName: String(data.displayName ?? 'Member'),
+          phoneNumber: String(data.phoneNumber ?? ''),
+          email: typeof data.email === 'string' ? data.email : null,
+          authMethod: data.authMethod === 'CODE_GUEST' ? 'CODE_GUEST' : 'GOOGLE',
+          smsEnabled: Boolean(data.smsEnabled ?? true),
+          updatedAtMs: tsToMs(data.updatedAt, 0),
+        };
+      }
+      onData(map);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (e) {
+        onError(e);
+      }
+    }
+  );
+}
+
+export async function saveUserSmsPreferences(
+  prefs: SmsPreferences,
+  options?: {
+    joinedGroupIds?: string[];
+    displayName?: string;
+  }
+): Promise<void> {
   const uid = requireUserId();
-  const path = `users/${uid}`;
-  const cleanPhone = prefs.phone.trim();
-  if (cleanPhone && !/^\+[1-9]\d{7,14}$/.test(cleanPhone)) {
+  const cleanPhone = prefs.phone.trim() ? normalizePhoneInput(prefs.phone) : '';
+  if (cleanPhone && !E164_PHONE_REGEX.test(cleanPhone)) {
     throw new Error('Phone number must be in E.164 format (e.g. +15551234567).');
   }
   if (prefs.enabled && !cleanPhone) {
     throw new Error('Enter a mobile phone number before enabling SMS notifications.');
   }
 
-  try {
-    await updateDoc(doc(db, 'users', uid), {
-      smsPhone: cleanPhone || null,
-      smsEnabled: Boolean(prefs.enabled),
-      smsForMessages: Boolean(prefs.forMessages),
-      smsForEvents: Boolean(prefs.forEvents),
-      updatedAt: serverTimestamp(),
+  const nextPrefs: SmsPreferences = {
+    phone: cleanPhone,
+    enabled: Boolean(prefs.enabled && cleanPhone),
+    forMessages: Boolean(prefs.forMessages),
+    forEvents: Boolean(prefs.forEvents),
+  };
+
+  if (!auth.currentUser && isGuestUid(uid)) {
+    updateGuestProfile({
+      displayName: options?.displayName,
+      phoneNumber: cleanPhone,
+      smsPreferences: nextPrefs,
     });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
+  } else {
+    const path = `users/${uid}`;
+    try {
+      const userRef = doc(db, 'users', uid);
+      const snap = await getDoc(userRef);
+      const resolvedName = (
+        options?.displayName?.trim() ||
+        auth.currentUser?.displayName?.trim() ||
+        auth.currentUser?.email?.split('@')[0]?.trim() ||
+        'Member'
+      ).slice(0, 60);
+      const email = (auth.currentUser?.email?.trim() || `${uid}@rallyhub.app`).slice(0, 160);
+      if (!snap.exists()) {
+        await setDoc(userRef, {
+          uid,
+          displayName: resolvedName,
+          email,
+          smsPhone: cleanPhone || null,
+          smsEnabled: nextPrefs.enabled,
+          smsForMessages: nextPrefs.forMessages,
+          smsForEvents: nextPrefs.forEvents,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const updatePayload: Record<string, unknown> = {
+          smsPhone: cleanPhone || null,
+          smsEnabled: nextPrefs.enabled,
+          smsForMessages: nextPrefs.forMessages,
+          smsForEvents: nextPrefs.forEvents,
+          updatedAt: serverTimestamp(),
+        };
+        if (options?.displayName?.trim()) {
+          updatePayload.displayName = options.displayName.trim().slice(0, 60);
+        }
+        await updateDoc(userRef, updatePayload);
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  }
+
+  if (cleanPhone && options?.joinedGroupIds && options.joinedGroupIds.length > 0) {
+    const isGuest = !auth.currentUser && isGuestUid(uid);
+    const resolvedName =
+      options.displayName?.trim() ||
+      auth.currentUser?.displayName?.trim() ||
+      getStoredGuestSession()?.displayName ||
+      'Member';
+    await Promise.allSettled(
+      options.joinedGroupIds.slice(0, 25).map((gid) =>
+        upsertMemberContact(gid, {
+          uid,
+          displayName: resolvedName,
+          phoneNumber: cleanPhone,
+          email: auth.currentUser?.email ?? null,
+          authMethod: isGuest ? 'CODE_GUEST' : 'GOOGLE',
+          smsEnabled: nextPrefs.enabled,
+        })
+      )
+    );
   }
 }
 
-export function subscribeAppAppearance(
-  onData: (appBackground: string) => void,
+export function subscribeUserPersonalAppearance(
+  uid: string,
+  onData: (appearance: PersonalAppearance) => void,
   onError: (err: unknown) => void
 ): Unsubscribe {
-  const path = 'appSettings/appearance';
-  return onSnapshot(
-    doc(db, 'appSettings', 'appearance'),
+  const initialLocal = readStoredPersonalAppearance(uid);
+  onData(initialLocal);
+  const unsubLocal = subscribeStoredPersonalAppearance(uid, onData);
+
+  if (!auth.currentUser && isGuestUid(uid)) {
+    return unsubLocal;
+  }
+
+  const path = `users/${uid}`;
+  const unsubRemote = onSnapshot(
+    doc(db, 'users', uid),
     (snap) => {
       if (!snap.exists()) {
-        onData('default');
+        onData(readStoredPersonalAppearance(uid));
         return;
       }
-      const raw = snap.data().appBackground;
-      onData(typeof raw === 'string' && isValidBackgroundSpec(raw) ? raw : 'default');
+      const data = snap.data();
+      const fallback = readStoredPersonalAppearance(uid);
+      const hasAnyRemoteField =
+        typeof data.personalColorTheme === 'string' ||
+        typeof data.personalColorMode === 'string' ||
+        typeof data.personalBackground === 'string' ||
+        typeof data.personalBannerBackground === 'string';
+
+      if (!hasAnyRemoteField) {
+        onData(fallback);
+        return;
+      }
+
+      const resolved = sanitizePersonalAppearance({
+        colorTheme:
+          typeof data.personalColorTheme === 'string' && isValidColorTheme(data.personalColorTheme)
+            ? data.personalColorTheme
+            : fallback.colorTheme,
+        colorMode:
+          typeof data.personalColorMode === 'string' && isValidColorMode(data.personalColorMode)
+            ? data.personalColorMode
+            : fallback.colorMode,
+        appBackground:
+          typeof data.personalBackground === 'string' && isValidBackgroundSpec(data.personalBackground)
+            ? data.personalBackground
+            : fallback.appBackground,
+        bannerBackground:
+          typeof data.personalBannerBackground === 'string' &&
+          isValidBackgroundSpec(data.personalBannerBackground)
+            ? data.personalBannerBackground
+            : fallback.bannerBackground,
+      });
+
+      writeStoredPersonalAppearance(uid, resolved);
+      onData(resolved);
     },
     (error) => {
       try {
@@ -202,6 +415,11 @@ export function subscribeAppAppearance(
       }
     }
   );
+
+  return () => {
+    unsubLocal();
+    unsubRemote();
+  };
 }
 
 export function subscribeJoinedGroups(
@@ -209,6 +427,13 @@ export function subscribeJoinedGroups(
   onData: (groups: JoinedGroupRef[]) => void,
   onError: (err: unknown) => void
 ): Unsubscribe {
+  if (!auth.currentUser && isGuestUid(uid)) {
+    onData(getStoredGuestSession()?.joinedGroups ?? []);
+    return subscribeGuestSession((session) => {
+      onData(session?.joinedGroups ?? []);
+    });
+  }
+
   const path = `users/${uid}/joinedGroups`;
   return onSnapshot(
     collection(db, 'users', uid, 'joinedGroups'),
@@ -409,8 +634,10 @@ export function subscribeChannels(
   onError: (err: unknown) => void
 ): Unsubscribe {
   const path = `groups/${groupId}/channels`;
-  const allowedLevels =
-    role === MemberRole.CREATOR || role === MemberRole.ADMIN
+  const isSignedInUser = Boolean(auth.currentUser);
+  const allowedLevels = !isSignedInUser
+    ? ['ALL']
+    : role === MemberRole.CREATOR || role === MemberRole.ADMIN
       ? ['ALL', 'ORGANIZER', 'ADMIN']
       : role === MemberRole.ORGANIZER
         ? ['ALL', 'ORGANIZER']
@@ -505,8 +732,10 @@ export function subscribeNotifications(
   onError: (err: unknown) => void
 ): Unsubscribe {
   const path = `groups/${groupId}/notifications`;
-  const allowedRoles =
-    role === MemberRole.CREATOR || role === MemberRole.ADMIN
+  const isSignedInUser = Boolean(auth.currentUser);
+  const allowedRoles = !isSignedInUser
+    ? ['ALL', 'PARTICIPANT']
+    : role === MemberRole.CREATOR || role === MemberRole.ADMIN
       ? ['ALL', 'PARTICIPANT', 'ORGANIZER', 'ADMIN']
       : role === MemberRole.ORGANIZER
         ? ['ALL', 'PARTICIPANT', 'ORGANIZER']
@@ -566,8 +795,9 @@ export function subscribeNotifications(
     }
   );
 
-  const isAdminOrCreator = role === MemberRole.CREATOR || role === MemberRole.ADMIN;
-  if (isAdminOrCreator) {
+  const isAdminOrCreator =
+    isSignedInUser && (role === MemberRole.CREATOR || role === MemberRole.ADMIN);
+  if (isAdminOrCreator || !isSignedInUser) {
     return unsubRole;
   }
 
@@ -721,7 +951,7 @@ export async function createGroupWithCode(
 ): Promise<string> {
   const normalizedCode = normalizeGroupCode(rawGroupCode);
   const groupId = makeId('grp', 16);
-  const uid = requireUserId();
+  const uid = requireGoogleUserId();
   const trimmedName = groupName.trim();
   const cleanImageUrl = normalizeGroupImageInput(groupImageUrl);
 
@@ -933,62 +1163,52 @@ export async function updateGroupDetails(
   }
 }
 
-export async function updateAppBackground(
-  sourceGroupId: string,
-  appBackground: string,
-  updatedByName: string
-): Promise<void> {
+export async function saveUserPersonalAppearance(
+  appearance: PersonalAppearance
+): Promise<PersonalAppearance> {
   const uid = requireUserId();
-  const path = 'appSettings/appearance';
-  const cleanBg = appBackground.trim();
-  if (!isValidBackgroundSpec(cleanBg)) {
-    throw new Error('Invalid background selection.');
+  const clean = writeStoredPersonalAppearance(uid, appearance);
+
+  if (!auth.currentUser && isGuestUid(uid)) {
+    return clean;
   }
 
+  const path = `users/${uid}`;
   try {
-    await setDoc(doc(db, 'appSettings', 'appearance'), {
-      appBackground: cleanBg,
-      sourceGroupId,
-      updatedBy: uid,
-      updatedByName: (updatedByName.trim() || 'Admin').slice(0, 60),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
-}
-
-export async function updateGroupBackground(
-  groupId: string,
-  groupBackground: string
-): Promise<void> {
-  const uid = requireUserId();
-  const path = `groups/${groupId}`;
-  const cleanBg = groupBackground.trim();
-  if (!isValidBackgroundSpec(cleanBg)) {
-    throw new Error('Invalid group background selection.');
-  }
-
-  try {
-    await updateDoc(doc(db, 'groups', groupId), {
-      groupBackground: cleanBg,
-      updatedAt: serverTimestamp(),
-    });
-    try {
-      const joinedRef = doc(db, 'users', uid, 'joinedGroups', groupId);
-      const joinedSnap = await getDoc(joinedRef);
-      if (joinedSnap.exists()) {
-        await updateDoc(joinedRef, {
-          groupBackground: cleanBg,
-          updatedAt: serverTimestamp(),
-        });
-      }
-    } catch {
-      // Best-effort joinedGroups cache sync
+    const userRef = doc(db, 'users', uid);
+    const snap = await getDoc(userRef);
+    if (!snap.exists()) {
+      const displayName = (
+        auth.currentUser?.displayName?.trim() ||
+        auth.currentUser?.email?.split('@')[0]?.trim() ||
+        'Member'
+      ).slice(0, 60);
+      const email = (auth.currentUser?.email?.trim() || `${uid}@rallyhub.app`).slice(0, 160);
+      await setDoc(userRef, {
+        uid,
+        displayName,
+        email,
+        personalColorTheme: clean.colorTheme,
+        personalColorMode: clean.colorMode,
+        personalBackground: clean.appBackground,
+        personalBannerBackground: clean.bannerBackground,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await updateDoc(userRef, {
+        personalColorTheme: clean.colorTheme,
+        personalColorMode: clean.colorMode,
+        personalBackground: clean.appBackground,
+        personalBannerBackground: clean.bannerBackground,
+        updatedAt: serverTimestamp(),
+      });
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
+
+  return clean;
 }
 
 export async function updateGroupImage(
@@ -1062,6 +1282,10 @@ export async function deleteGroup(groupId: string, groupCode?: string | null): P
 
 export async function removeJoinedGroupRef(groupId: string): Promise<void> {
   const uid = requireUserId();
+  if (!auth.currentUser && isGuestUid(uid)) {
+    removeGuestJoinedGroup(groupId);
+    return;
+  }
   const path = `users/${uid}/joinedGroups/${groupId}`;
   try {
     await deleteDoc(doc(db, 'users', uid, 'joinedGroups', groupId));
@@ -1070,24 +1294,75 @@ export async function removeJoinedGroupRef(groupId: string): Promise<void> {
   }
 }
 
-export async function updateOwnDisplayName(groupId: string, newDisplayName: string): Promise<void> {
+export async function updateOwnDisplayName(
+  groupId: string,
+  newDisplayName: string,
+  newPhoneNumber?: string | null
+): Promise<void> {
   const uid = requireUserId();
+  const isGuest = !auth.currentUser && isGuestUid(uid);
   const path = `groups/${groupId}/members/${uid}`;
   const clean = newDisplayName.trim();
   if (clean.length < 1 || clean.length > 60) {
     throw new Error('Display name must be 1–60 characters.');
   }
+  const cleanPhone =
+    newPhoneNumber !== undefined && newPhoneNumber !== null && newPhoneNumber.trim()
+      ? normalizePhoneInput(newPhoneNumber)
+      : null;
+  if (cleanPhone && !E164_PHONE_REGEX.test(cleanPhone)) {
+    throw new Error('Enter a valid cell phone number (e.g. +15551234567).');
+  }
+
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'groups', groupId, 'members', uid), {
-      displayName: clean,
-      updatedAt: serverTimestamp(),
-    });
-    batch.update(doc(db, 'users', uid), {
-      displayName: clean,
-      updatedAt: serverTimestamp(),
-    });
-    await batch.commit();
+    if (isGuest) {
+      await updateDoc(doc(db, 'groups', groupId, 'members', uid), {
+        displayName: clean,
+        updatedAt: serverTimestamp(),
+      });
+      const updatedGuest = updateGuestProfile({
+        displayName: clean,
+        ...(cleanPhone ? { phoneNumber: cleanPhone } : {}),
+      });
+      const phoneToSync = cleanPhone ?? updatedGuest?.phoneNumber ?? '';
+      if (phoneToSync && E164_PHONE_REGEX.test(phoneToSync)) {
+        await upsertMemberContact(groupId, {
+          uid,
+          displayName: clean,
+          phoneNumber: phoneToSync,
+          email: null,
+          authMethod: 'CODE_GUEST',
+          smsEnabled: updatedGuest?.smsPreferences.enabled ?? true,
+        });
+      }
+    } else {
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'groups', groupId, 'members', uid), {
+        displayName: clean,
+        updatedAt: serverTimestamp(),
+      });
+      const userUpdate: Record<string, unknown> = {
+        displayName: clean,
+        updatedAt: serverTimestamp(),
+      };
+      if (cleanPhone) {
+        userUpdate.smsPhone = cleanPhone;
+        userUpdate.smsEnabled = true;
+      }
+      batch.update(doc(db, 'users', uid), userUpdate);
+      await batch.commit();
+
+      if (cleanPhone) {
+        await upsertMemberContact(groupId, {
+          uid,
+          displayName: clean,
+          phoneNumber: cleanPhone,
+          email: auth.currentUser?.email ?? null,
+          authMethod: 'GOOGLE',
+          smsEnabled: true,
+        }).catch(() => {});
+      }
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
@@ -1095,12 +1370,37 @@ export async function updateOwnDisplayName(groupId: string, newDisplayName: stri
 
 export async function joinGroupByCode(
   rawCode: string,
-  displayNameOverride?: string | null
+  displayNameOverride?: string | null,
+  phoneNumberOverride?: string | null
 ): Promise<string> {
   const code = normalizeGroupCode(rawCode);
   const uid = requireUserId();
+  const isGuest = !auth.currentUser && isGuestUid(uid);
   if (!/^[A-Z0-9_-]{4,24}$/.test(code)) {
     throw new Error('Enter a valid 4–24 character Group Code.');
+  }
+
+  const guestSession = isGuest ? getStoredGuestSession() : null;
+  const resolvedNameRaw =
+    displayNameOverride?.trim() ||
+    guestSession?.displayName?.trim() ||
+    auth.currentUser?.displayName?.trim() ||
+    auth.currentUser?.email?.split('@')[0]?.trim() ||
+    '';
+
+  if (isGuest && resolvedNameRaw.length < 2) {
+    throw new Error('Please enter your name (at least 2 characters) to join with a group code.');
+  }
+  const displayName = (resolvedNameRaw || 'Participant').slice(0, 60);
+
+  const rawPhoneCandidate =
+    phoneNumberOverride?.trim() || guestSession?.phoneNumber?.trim() || '';
+  const normalizedPhone = rawPhoneCandidate ? normalizePhoneInput(rawPhoneCandidate) : '';
+  if (isGuest && !E164_PHONE_REGEX.test(normalizedPhone)) {
+    throw new Error('Please enter a valid cell phone number (e.g. (555) 123-4567).');
+  }
+  if (rawPhoneCandidate && !E164_PHONE_REGEX.test(normalizedPhone)) {
+    throw new Error('Please enter a valid cell phone number (e.g. (555) 123-4567).');
   }
 
   try {
@@ -1120,16 +1420,6 @@ export async function joinGroupByCode(
       ? String(existingMember.data().role ?? MemberRole.PARTICIPANT)
       : MemberRole.PARTICIPANT;
 
-    const displayName = (
-      displayNameOverride?.trim() ||
-      auth.currentUser?.displayName?.trim() ||
-      auth.currentUser?.email?.split('@')[0]?.trim() ||
-      'Participant'
-    ).slice(0, 60);
-
-    const joinedGroupRef = doc(db, 'users', uid, 'joinedGroups', groupId);
-    const existingJoined = await getDoc(joinedGroupRef);
-
     if (!existingMember.exists()) {
       await setDoc(memberRef, {
         uid,
@@ -1148,7 +1438,9 @@ export async function joinGroupByCode(
         } catch {
           // Best-effort rollback
         }
-        throw new Error(`This group has reached its maximum capacity of ${MAX_GROUP_MEMBERS} members.`);
+        throw new Error(
+          `This group has reached its maximum capacity of ${MAX_GROUP_MEMBERS} members.`
+        );
       }
     } else if (
       displayNameOverride?.trim() &&
@@ -1160,22 +1452,89 @@ export async function joinGroupByCode(
       });
     }
 
-    if (existingJoined.exists()) {
-      await updateDoc(joinedGroupRef, {
-        groupName,
-        groupCode: code,
-        role: resolvedRole,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await setDoc(joinedGroupRef, {
+    // Resolve phone number for Google users from profile if not passed explicitly
+    let finalPhone = normalizedPhone;
+    if (!finalPhone && auth.currentUser) {
+      try {
+        const userSnap = await getDoc(doc(db, 'users', uid));
+        if (userSnap.exists() && typeof userSnap.data().smsPhone === 'string') {
+          finalPhone = normalizePhoneInput(userSnap.data().smsPhone);
+        }
+      } catch {
+        // Ignore profile lookup errors
+      }
+    }
+
+    if (finalPhone && E164_PHONE_REGEX.test(finalPhone)) {
+      await upsertMemberContact(groupId, {
+        uid,
+        displayName,
+        phoneNumber: finalPhone,
+        email: auth.currentUser?.email ?? null,
+        authMethod: isGuest ? 'CODE_GUEST' : 'GOOGLE',
+        smsEnabled: true,
+      }).catch(() => {});
+
+      if (auth.currentUser && normalizedPhone) {
+        await updateDoc(doc(db, 'users', uid), {
+          displayName,
+          smsPhone: normalizedPhone,
+          smsEnabled: true,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+    }
+
+    if (isGuest) {
+      let groupBackground: string | null = null;
+      let groupImageUrl: string | null = null;
+      try {
+        const grpSnap = await getDoc(doc(db, 'groups', groupId));
+        if (grpSnap.exists()) {
+          groupBackground =
+            typeof grpSnap.data().groupBackground === 'string'
+              ? grpSnap.data().groupBackground
+              : null;
+          groupImageUrl =
+            typeof grpSnap.data().groupImageUrl === 'string'
+              ? grpSnap.data().groupImageUrl
+              : null;
+        }
+      } catch {
+        // Ignore optional metadata fetch error
+      }
+      updateGuestProfile({ displayName, phoneNumber: finalPhone });
+      upsertGuestJoinedGroup({
+        id: groupId,
         groupId,
         groupName,
         groupCode: code,
         role: resolvedRole,
-        joinedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        groupBackground,
+        groupImageUrl,
+        joinedAtMs: Date.now(),
+        updatedAtMs: Date.now(),
       });
+    } else {
+      const joinedGroupRef = doc(db, 'users', uid, 'joinedGroups', groupId);
+      const existingJoined = await getDoc(joinedGroupRef);
+      if (existingJoined.exists()) {
+        await updateDoc(joinedGroupRef, {
+          groupName,
+          groupCode: code,
+          role: resolvedRole,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(joinedGroupRef, {
+          groupId,
+          groupName,
+          groupCode: code,
+          role: resolvedRole,
+          joinedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
 
     if (!existingMember.exists()) {
@@ -1185,7 +1544,7 @@ export async function joinGroupByCode(
         category: ActivityCategory.MEMBER,
         action: ActivityAction.MEMBER_JOINED,
         summary: `Joined "${groupName}"`,
-        details: `Invite code ${code}`,
+        details: isGuest ? `Joined via invite code ${code}` : `Invite code ${code}`,
         targetId: uid,
       }).catch(() => {});
     }
@@ -1195,7 +1554,9 @@ export async function joinGroupByCode(
       error instanceof Error &&
       (error.message.includes('No active group found') ||
         error.message.includes('Group code') ||
-        error.message.includes('maximum capacity'))
+        error.message.includes('maximum capacity') ||
+        error.message.includes('enter your name') ||
+        error.message.includes('cell phone'))
     ) {
       throw error;
     }
@@ -1255,13 +1616,14 @@ export async function removeMember(
   groupId: string,
   targetMemberUid: string
 ): Promise<void> {
-  const actorUid = requireUserId();
+  const actorUid = requireGoogleUserId();
   if (targetMemberUid === actorUid) {
     throw new Error('You cannot remove yourself from the group here.');
   }
   const path = `groups/${groupId}/members/${targetMemberUid}`;
   try {
     await deleteDoc(doc(db, 'groups', groupId, 'members', targetMemberUid));
+    await deleteDoc(doc(db, 'groups', groupId, 'memberContacts', targetMemberUid)).catch(() => {});
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }

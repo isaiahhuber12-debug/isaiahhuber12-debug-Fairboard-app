@@ -9,24 +9,33 @@ import {
   Cloud,
   Hourglass,
   Megaphone,
+  MessageSquareShare,
+  Palette,
   Pencil,
+  Phone,
   Shield,
   Sparkles,
   Trash2,
   Users,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
-import { getGroupBackgroundPresentation } from '../../lib/backgrounds';
+import { getPersonalBannerPresentation } from '../../lib/backgrounds';
 import {
   countdownLabel,
   formatDateTime,
 } from '../../lib/dateFormat';
 import { isReminderAt30mSet } from '../../lib/notifications';
 import {
+  E164_PHONE_REGEX,
+  formatPhoneDisplay,
+  normalizePhoneInput,
+} from '../../services/smsService';
+import {
   ApprovalStatus,
   type EventTask,
   type GroupMember,
   type HubNotification,
+  type MemberContactInfo,
   MemberRole,
   NotificationType,
   parseApprovalStatus,
@@ -44,6 +53,9 @@ import {
   RoleBadge,
 } from '../RallyComponents';
 import { ActivityLog } from '../ActivityLog';
+import { PersonalAppearanceModal } from '../BackgroundCustomizerCard';
+import { GroupSmsComposerModal } from '../GroupSmsComposerModal';
+import { QrInviteShareButton } from '../QrInviteShareModal';
 
 interface DashboardScreenProps {
   state: RallyWorkspaceState;
@@ -114,6 +126,10 @@ export function DashboardScreen({
   const [deleteSpotlightNotif, setDeleteSpotlightNotif] = useState<HubNotification | null>(null);
   const [showEditNameDialog, setShowEditNameDialog] = useState(false);
   const [nameInput, setNameInput] = useState(state.currentUserName);
+  const [phoneInput, setPhoneInput] = useState(state.smsPreferences.phone);
+  const [showSmsComposer, setShowSmsComposer] = useState(false);
+  const [smsTargetPhones, setSmsTargetPhones] = useState<string[] | undefined>(undefined);
+  const [showAppearanceModal, setShowAppearanceModal] = useState(false);
   const [showAllMembers, setShowAllMembers] = useState(false);
   const [showAllEvents, setShowAllEvents] = useState(false);
   const [showAllOpenTasks, setShowAllOpenTasks] = useState(false);
@@ -130,11 +146,8 @@ export function DashboardScreen({
   const canManageEvents = ROLE_META[state.currentRole].canManageEventsAndTasks;
   const canAdmin = ROLE_META[state.currentRole].canAccessAdminPanel;
   const groupBg = useMemo(
-    () =>
-      getGroupBackgroundPresentation(
-        group?.groupBackground ?? (group ? state.groupBackgroundsById[group.id] : null)
-      ),
-    [group, state.groupBackgroundsById]
+    () => getPersonalBannerPresentation(state.personalAppearance),
+    [state.personalAppearance]
   );
 
   return (
@@ -210,19 +223,25 @@ export function DashboardScreen({
         )}
 
         <div
-          className={`mt-2 flex items-center gap-2 text-xs ${
+          className={`mt-2 flex flex-wrap items-center gap-2 text-xs ${
             groupBg.isLightBg ? 'text-slate-700' : 'text-white/90'
           }`}
         >
-          <span className="truncate">Signed in as {state.currentUserName}</span>
+          <span className="truncate">
+            Signed in as {state.currentUserName}
+            {state.smsPreferences.phone
+              ? ` • ${formatPhoneDisplay(state.smsPreferences.phone)}`
+              : ''}
+          </span>
           <button
             type="button"
             onClick={() => {
               setNameInput(state.currentUserName);
+              setPhoneInput(state.smsPreferences.phone);
               setShowEditNameDialog(true);
             }}
             data-testid="edit_display_name_button"
-            title="Edit display name"
+            title="Edit your name and cell phone number"
             className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition ${
               groupBg.isLightBg
                 ? 'bg-slate-900/10 text-slate-900 hover:bg-slate-900/20'
@@ -231,11 +250,26 @@ export function DashboardScreen({
           >
             <Pencil className="h-3.5 w-3.5" />
           </button>
+          <button
+            type="button"
+            onClick={() => setShowAppearanceModal(true)}
+            data-testid="dashboard_appearance_button"
+            title="Customize your personal colors and background"
+            className={`inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-semibold transition ${
+              groupBg.isLightBg
+                ? 'bg-slate-900/10 text-slate-900 hover:bg-slate-900/20'
+                : 'bg-white/15 text-white hover:bg-white/25'
+            }`}
+          >
+            <Palette className="h-3.5 w-3.5" />
+            <span>My Colors &amp; Background</span>
+          </button>
         </div>
 
         {group && (
           <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
             <GroupCodePill code={group.groupCode} onCopied={onCopiedCode} />
+            <QrInviteShareButton groupCode={group.groupCode} groupName={group.name} />
           </div>
         )}
       </div>
@@ -329,8 +363,14 @@ export function DashboardScreen({
       <GroupRosterCard
         membersState={state.membersState}
         currentUserId={state.currentUserId}
+        canViewContacts={canAdmin}
+        memberContactsByUid={state.memberContactsByUid}
         expanded={showAllMembers}
         onToggleExpand={() => setShowAllMembers((prev) => !prev)}
+        onOpenSmsComposer={(targetPhone) => {
+          setSmsTargetPhones(targetPhone ? [targetPhone] : undefined);
+          setShowSmsComposer(true);
+        }}
       />
 
       {/* Announcement Spotlight */}
@@ -611,11 +651,11 @@ export function DashboardScreen({
         </p>
       </ModalDialog>
 
-      {/* Edit Display Name Dialog */}
+      {/* Edit Name & Cell Phone Dialog */}
       <ModalDialog
         open={showEditNameDialog}
         onClose={() => setShowEditNameDialog(false)}
-        title="Edit Your Display Name"
+        title="Edit Your Name & Cell Phone"
         footer={
           <>
             <button
@@ -627,9 +667,16 @@ export function DashboardScreen({
             </button>
             <button
               type="button"
-              disabled={nameInput.trim().length < 2}
+              disabled={
+                nameInput.trim().length < 2 ||
+                (Boolean(phoneInput.trim()) &&
+                  !E164_PHONE_REGEX.test(normalizePhoneInput(phoneInput)))
+              }
               onClick={() => {
-                void actions.updateDisplayName(nameInput);
+                void actions.updateDisplayName(
+                  nameInput,
+                  phoneInput.trim() ? normalizePhoneInput(phoneInput) : null
+                );
                 setShowEditNameDialog(false);
               }}
               data-testid="confirm_display_name_button"
@@ -640,19 +687,67 @@ export function DashboardScreen({
           </>
         }
       >
-        <div className="space-y-1">
-          <label className="block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
-            Display Name
-          </label>
-          <input
-            type="text"
-            value={nameInput}
-            onChange={(e) => setNameInput(e.target.value.slice(0, 50))}
-            data-testid="edit_display_name_input"
-            className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
-          />
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+              Display Name
+            </label>
+            <input
+              type="text"
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value.slice(0, 50))}
+              data-testid="edit_display_name_input"
+              className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+              Cell Phone Number
+            </label>
+            <input
+              type="tel"
+              value={phoneInput}
+              onChange={(e) => setPhoneInput(e.target.value.slice(0, 24))}
+              placeholder="(555) 123-4567"
+              data-testid="edit_phone_number_input"
+              className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 font-mono-code text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+            />
+            <p className="text-[11px] text-[var(--rally-on-surface-variant)]">
+              Visible to your group&apos;s Creator and Admins for coordination and SMS updates.
+            </p>
+          </div>
         </div>
       </ModalDialog>
+
+      {/* Outbound SMS Composer Modal */}
+      <GroupSmsComposerModal
+        open={showSmsComposer}
+        onClose={() => {
+          setShowSmsComposer(false);
+          setSmsTargetPhones(undefined);
+        }}
+        groupName={group?.name ?? null}
+        members={members}
+        memberContactsByUid={state.memberContactsByUid}
+        initialRecipientPhones={smsTargetPhones}
+        serverConfigured={state.smsServerConfigured}
+        serverStatus={state.smsServerStatus}
+        onRefreshServerStatus={actions.refreshSmsServerStatus}
+        isGuest={state.isGuest}
+        isBusy={state.isBusy}
+        onSendCloudSms={actions.sendDirectSmsBroadcast}
+        onBanner={actions.showBanner}
+      />
+
+      {/* Personal Colors & Background Modal */}
+      <PersonalAppearanceModal
+        open={showAppearanceModal}
+        onClose={() => setShowAppearanceModal(false)}
+        appearance={state.personalAppearance}
+        isBusy={state.isBusy}
+        onUpdate={(patch) => void actions.updatePersonalAppearance(patch)}
+        onReset={() => void actions.resetPersonalAppearance()}
+      />
     </div>
   );
 }
@@ -660,13 +755,19 @@ export function DashboardScreen({
 function GroupRosterCard({
   membersState,
   currentUserId,
+  canViewContacts,
+  memberContactsByUid,
   expanded,
   onToggleExpand,
+  onOpenSmsComposer,
 }: {
   membersState: RallyWorkspaceState['membersState'];
   currentUserId: string;
+  canViewContacts: boolean;
+  memberContactsByUid: Record<string, MemberContactInfo>;
   expanded: boolean;
   onToggleExpand: () => void;
+  onOpenSmsComposer: (targetPhone?: string) => void;
 }) {
   const [expandedLimit, setExpandedLimit] = useState(50);
   const memberLimit = expanded ? expandedLimit : 6;
@@ -676,16 +777,29 @@ function GroupRosterCard({
       data-testid="dashboard_members_card"
       className="space-y-2.5 rounded-2xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-4"
     >
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Users className="h-5 w-5 text-[var(--rally-primary)]" />
-          <h3 className="font-display text-base font-bold">Group Admins & Members</h3>
+          <h3 className="font-display text-base font-bold">Group Admins &amp; Members</h3>
         </div>
-        {membersState.status === 'success' && (
-          <span className="text-xs font-medium text-[var(--rally-on-surface-variant)]">
-            {membersState.data.length} / 500
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {canViewContacts && (
+            <button
+              type="button"
+              onClick={() => onOpenSmsComposer(undefined)}
+              data-testid="dashboard_roster_send_sms_button"
+              className="inline-flex items-center gap-1 rounded-lg bg-[var(--rally-primary-container)] px-2.5 py-1 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95"
+            >
+              <MessageSquareShare className="h-3.5 w-3.5" />
+              <span>Send SMS</span>
+            </button>
+          )}
+          {membersState.status === 'success' && (
+            <span className="text-xs font-medium text-[var(--rally-on-surface-variant)]">
+              {membersState.data.length} / 500
+            </span>
+          )}
+        </div>
       </div>
 
       {membersState.status === 'loading' && (
@@ -715,7 +829,10 @@ function GroupRosterCard({
                 <DashboardMemberRow
                   key={member.uid}
                   member={member}
+                  contact={canViewContacts ? memberContactsByUid[member.uid] : undefined}
+                  canViewContacts={canViewContacts}
                   isCurrentUser={member.uid === currentUserId}
+                  onTextMember={(phone) => onOpenSmsComposer(phone)}
                 />
               ))}
               {membersState.data.length > 6 && (
@@ -761,10 +878,16 @@ function GroupRosterCard({
 
 function DashboardMemberRow({
   member,
+  contact,
+  canViewContacts,
   isCurrentUser,
+  onTextMember,
 }: {
   member: GroupMember;
+  contact?: MemberContactInfo;
+  canViewContacts: boolean;
   isCurrentUser: boolean;
+  onTextMember: (phone: string) => void;
 }) {
   const role = parseMemberRole(member.role);
   const isLeadership = role === MemberRole.CREATOR || role === MemberRole.ADMIN;
@@ -788,9 +911,29 @@ function DashboardMemberRow({
       >
         {initial}
       </div>
-      <div className="min-w-0 flex-1 truncate text-sm font-medium">
-        {isCurrentUser ? `${member.displayName} (You)` : member.displayName}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">
+          {isCurrentUser ? `${member.displayName} (You)` : member.displayName}
+        </div>
+        {canViewContacts && contact?.phoneNumber && (
+          <div className="mt-0.5 flex items-center gap-1.5 font-mono-code text-xs text-[var(--rally-on-surface-variant)]">
+            <Phone className="h-3 w-3 text-[var(--rally-primary)]" />
+            <span>{formatPhoneDisplay(contact.phoneNumber)}</span>
+          </div>
+        )}
       </div>
+      {canViewContacts && contact?.phoneNumber && (
+        <button
+          type="button"
+          onClick={() => onTextMember(contact.phoneNumber)}
+          data-testid={`dashboard_text_member_${member.uid}`}
+          title={`Text ${member.displayName}`}
+          className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[var(--rally-surface)] px-2 py-1 text-[11px] font-semibold text-[var(--rally-primary)] shadow-2xs transition hover:bg-[var(--rally-primary-container)]/50"
+        >
+          <MessageSquareShare className="h-3 w-3" />
+          <span>SMS</span>
+        </button>
+      )}
       <RoleBadge role={role} />
     </div>
   );

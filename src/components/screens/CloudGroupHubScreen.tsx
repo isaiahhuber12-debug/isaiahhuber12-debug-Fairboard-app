@@ -4,13 +4,25 @@ import {
   ChevronRight,
   KeyRound,
   Loader2,
+  LogIn,
   LogOut,
+  Palette,
+  Phone,
   PlusCircle,
+  QrCode,
+  ShieldCheck,
   Trash2,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
-import { getGroupBackgroundPresentation } from '../../lib/backgrounds';
+import { getPersonalBannerPresentation } from '../../lib/backgrounds';
+import { readInviteCodeFromWindowLocation } from '../../lib/qrInvite';
+import {
+  E164_PHONE_REGEX,
+  formatPhoneDisplay,
+  normalizePhoneInput,
+} from '../../services/smsService';
 import { type JoinedGroupRef, MemberRole, parseMemberRole } from '../../types/rally';
+import { PersonalAppearanceModal } from '../BackgroundCustomizerCard';
 import {
   ConfirmDeleteDialog,
   GroupAvatar,
@@ -18,6 +30,7 @@ import {
   RoleBadge,
 } from '../RallyComponents';
 import { GroupImageDialog, GroupImageEditor } from '../GroupImageEditor';
+import { QrScannerModal } from '../QrScannerModal';
 
 interface CloudGroupHubScreenProps {
   state: RallyWorkspaceState;
@@ -30,8 +43,9 @@ export function CloudGroupHubScreen({
   actions,
   onSignOut,
 }: CloudGroupHubScreenProps) {
-  const [joinCode, setJoinCode] = useState('');
+  const [joinCode, setJoinCode] = useState(() => readInviteCodeFromWindowLocation() ?? '');
   const [joinDisplayName, setJoinDisplayName] = useState('');
+  const [joinPhone, setJoinPhone] = useState(() => state.smsPreferences.phone || '');
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupCode, setNewGroupCode] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
@@ -39,7 +53,13 @@ export function CloudGroupHubScreen({
   const [createdCount, setCreatedCount] = useState(0);
   const [deletingGroup, setDeletingGroup] = useState<JoinedGroupRef | null>(null);
   const [editingImageGroup, setEditingImageGroup] = useState<JoinedGroupRef | null>(null);
+  const [showQrScanner, setShowQrScanner] = useState(false);
+  const [showAppearanceModal, setShowAppearanceModal] = useState(false);
   const groupNameInputRef = useRef<HTMLInputElement | null>(null);
+
+  const effectiveJoinPhone = joinPhone.trim() || state.smsPreferences.phone || '';
+  const normalizedJoinPhone = effectiveJoinPhone ? normalizePhoneInput(effectiveJoinPhone) : '';
+  const isJoinPhoneValid = E164_PHONE_REGEX.test(normalizedJoinPhone);
 
   const normalizedPreviewCode = newGroupCode.trim().toUpperCase().replace(/\s+/g, '-');
   const isCodeValid = /^[A-Z0-9_-]{4,24}$/.test(normalizedPreviewCode);
@@ -83,20 +103,44 @@ export function CloudGroupHubScreen({
           <h1 className="truncate font-display text-2xl font-bold text-[var(--rally-canvas-text,var(--rally-on-surface))]">
             Welcome, {state.currentUserName}
           </h1>
-          {state.currentUserEmail && (
-            <p className="truncate text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
-              {state.currentUserEmail}
-            </p>
-          )}
+          <p className="truncate text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
+            {state.currentUserEmail
+              ? state.currentUserEmail
+              : 'Joined via Group Code (No Email)'}
+            {state.smsPreferences.phone
+              ? ` • ${formatPhoneDisplay(state.smsPreferences.phone)}`
+              : ''}
+          </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <OfflineStatusBadge />
           <button
             type="button"
+            onClick={() => setShowAppearanceModal(true)}
+            data-testid="hub_appearance_button"
+            title="Customize your personal colors and background"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-2 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)]"
+          >
+            <Palette className="h-4 w-4 text-[var(--rally-primary)]" />
+            <span>My Theme</span>
+          </button>
+          {state.isGuest && (
+            <button
+              type="button"
+              onClick={() => actions.requestGoogleSignIn()}
+              data-testid="hub_google_sign_in_button"
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-[var(--rally-primary)]/45 bg-[var(--rally-surface)] px-3 py-2 text-xs font-semibold text-[var(--rally-primary)] transition hover:bg-[var(--rally-primary-container)]/50"
+            >
+              <LogIn className="h-4 w-4" />
+              <span>Google Sign-In</span>
+            </button>
+          )}
+          <button
+            type="button"
             onClick={onSignOut}
             data-testid="hub_sign_out_button"
             title="Sign out"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-2 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)]"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-2 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)]"
           >
             <LogOut className="h-4 w-4" />
             <span>Sign Out</span>
@@ -116,36 +160,68 @@ export function CloudGroupHubScreen({
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
               Group Code
             </label>
-            <input
-              type="text"
-              value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase().slice(0, 24))}
-              placeholder="e.g. RALLY26"
-              data-testid="cloud_join_code_input"
-              className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 font-mono-code text-sm uppercase tracking-wider focus:border-[var(--rally-primary)] focus:outline-none"
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={joinCode}
+                onChange={(e) => setJoinCode(e.target.value.toUpperCase().slice(0, 24))}
+                placeholder="e.g. RALLY26"
+                data-testid="cloud_join_code_input"
+                className="min-w-0 flex-1 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 font-mono-code text-sm uppercase tracking-wider focus:border-[var(--rally-primary)] focus:outline-none"
+              />
+              <button
+                type="button"
+                disabled={state.isBusy}
+                onClick={() => setShowQrScanner(true)}
+                data-testid="cloud_scan_qr_button"
+                title="Scan a host's QR code with your camera"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--rally-primary)]/40 bg-[var(--rally-primary-container)]/50 px-3.5 py-2.5 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95 disabled:opacity-45"
+              >
+                <QrCode className="h-4 w-4" />
+                <span>Scan QR</span>
+              </button>
+            </div>
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
-              Your Display Name (Optional)
-            </label>
-            <input
-              type="text"
-              value={joinDisplayName}
-              onChange={(e) => setJoinDisplayName(e.target.value.slice(0, 40))}
-              placeholder={state.currentUserName}
-              data-testid="cloud_join_name_input"
-              className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
-            />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+                Your Full Name
+              </label>
+              <input
+                type="text"
+                value={joinDisplayName}
+                onChange={(e) => setJoinDisplayName(e.target.value.slice(0, 40))}
+                placeholder={state.currentUserName}
+                data-testid="cloud_join_name_input"
+                className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+                Cell Phone Number <span className="text-[var(--rally-secondary)]">*</span>
+              </label>
+              <div className="relative">
+                <Phone className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--rally-on-surface-variant)]" />
+                <input
+                  type="tel"
+                  value={joinPhone}
+                  onChange={(e) => setJoinPhone(e.target.value.slice(0, 24))}
+                  placeholder={state.smsPreferences.phone || '(555) 123-4567'}
+                  data-testid="cloud_join_phone_input"
+                  className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-2.5 pl-9 pr-3.5 font-mono-code text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+                />
+              </div>
+            </div>
           </div>
 
           <button
             type="button"
-            disabled={state.isBusy || joinCode.trim().length < 4}
+            disabled={state.isBusy || joinCode.trim().length < 4 || !isJoinPhoneValid}
             onClick={() => {
               const resolvedName = joinDisplayName.trim() || state.currentUserName;
-              void actions.joinGroupByCode(joinCode, resolvedName);
+              void actions.joinGroupByCode(joinCode, resolvedName, normalizedJoinPhone);
             }}
             data-testid="cloud_join_button"
             className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--rally-primary)] px-4 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
@@ -172,11 +248,31 @@ export function CloudGroupHubScreen({
           </div>
         </div>
 
-        <div className="mt-3.5 space-y-3">
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
-              Group Name
-            </label>
+        {state.isGuest ? (
+          <div className="mt-4 space-y-3 rounded-2xl border border-[var(--rally-outline)]/60 bg-[var(--rally-surface-variant)]/30 p-4">
+            <div className="flex items-start gap-2.5 text-xs text-[var(--rally-on-surface-variant)]">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[var(--rally-primary)]" />
+              <p>
+                Group Creators sign in with Google so they keep permanent ownership over group
+                settings, admin permissions, and member phone numbers across devices.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => actions.requestGoogleSignIn()}
+              data-testid="guest_upgrade_create_group_button"
+              className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--rally-primary)] px-4 text-sm font-semibold text-white transition hover:brightness-110"
+            >
+              <LogIn className="h-4 w-4" />
+              <span>Sign In with Google to Create a Group</span>
+            </button>
+          </div>
+        ) : (
+          <div className="mt-3.5 space-y-3">
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+                Group Name
+              </label>
             <input
               ref={groupNameInputRef}
               type="text"
@@ -285,6 +381,7 @@ export function CloudGroupHubScreen({
             </button>
           </div>
         </div>
+        )}
       </div>
 
       {/* Your Cloud Groups */}
@@ -296,9 +393,7 @@ export function CloudGroupHubScreen({
           <div className="space-y-2">
             {state.joinedGroups.map((groupRef) => {
               const isGroupCreator = parseMemberRole(groupRef.role) === MemberRole.CREATOR;
-              const bgSpec =
-                state.groupBackgroundsById[groupRef.groupId] ?? groupRef.groupBackground ?? 'default';
-              const groupBg = getGroupBackgroundPresentation(bgSpec);
+              const groupBg = getPersonalBannerPresentation(state.personalAppearance);
               const groupImgUrl =
                 groupRef.groupId in state.groupImagesById
                   ? state.groupImagesById[groupRef.groupId]
@@ -432,6 +527,27 @@ export function CloudGroupHubScreen({
           }}
         />
       )}
+
+      <QrScannerModal
+        open={showQrScanner}
+        onClose={() => setShowQrScanner(false)}
+        onCodeScanned={(scannedCode) => {
+          setJoinCode(scannedCode);
+          if (isJoinPhoneValid) {
+            const resolvedName = joinDisplayName.trim() || state.currentUserName;
+            void actions.joinGroupByCode(scannedCode, resolvedName, normalizedJoinPhone);
+          }
+        }}
+      />
+
+      <PersonalAppearanceModal
+        open={showAppearanceModal}
+        onClose={() => setShowAppearanceModal(false)}
+        appearance={state.personalAppearance}
+        isBusy={state.isBusy}
+        onUpdate={(patch) => void actions.updatePersonalAppearance(patch)}
+        onReset={() => void actions.resetPersonalAppearance()}
+      />
     </div>
   );
 }

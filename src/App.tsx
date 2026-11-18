@@ -1,12 +1,15 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   BellRing,
   Calendar,
   LayoutDashboard,
   Loader2,
+  LogIn,
   LogOut,
   MessageSquare,
+  Palette,
+  Phone,
   RefreshCw,
   ShieldCheck,
   Sparkles,
@@ -27,11 +30,36 @@ import {
   isEmbeddedWebView,
   isUnsupportedSchemeForFirebaseAuth,
 } from './lib/firebase';
-import { getAppBackgroundPresentation } from './lib/backgrounds';
+import { getFriendlyErrorMessage } from './lib/firestoreError';
+import {
+  clearGuestSession,
+  ensureGuestSession,
+  getStoredGuestSession,
+  type GuestSession,
+  subscribeGuestSession,
+} from './lib/guestSession';
+import {
+  DEFAULT_PERSONAL_APPEARANCE,
+  getAppBackgroundPresentation,
+  getThemeCssVariables,
+  type PersonalAppearance,
+  readStoredPersonalAppearance,
+  sanitizePersonalAppearance,
+  subscribeStoredPersonalAppearance,
+  writeStoredPersonalAppearance,
+} from './lib/backgrounds';
+import * as repo from './services/rallyRepository';
+import { E164_PHONE_REGEX, normalizePhoneInput } from './services/smsService';
 import { useAiCoordinator } from './hooks/useAiCoordinator';
-import { useRallyWorkspace } from './hooks/useRallyWorkspace';
-import { type HubTab, ROLE_META } from './types/rally';
-import { GroupAvatar, OfflineStatusBadge, RoleBadge } from './components/RallyComponents';
+import { type PendingJoinRequest, useRallyWorkspace } from './hooks/useRallyWorkspace';
+import { type HubTab, ROLE_META, type WorkspaceIdentity } from './types/rally';
+import { PersonalAppearanceModal } from './components/BackgroundCustomizerCard';
+import {
+  GroupAvatar,
+  ModalDialog,
+  OfflineStatusBadge,
+  RoleBadge,
+} from './components/RallyComponents';
 import { AuthAndJoinScreen } from './components/screens/AuthAndJoinScreen';
 import { CloudGroupHubScreen } from './components/screens/CloudGroupHubScreen';
 import { DashboardScreen } from './components/screens/DashboardScreen';
@@ -56,18 +84,32 @@ const ALL_TABS: NavTabItem[] = [
 ];
 
 const PENDING_JOIN_STORAGE_KEY = 'rallyhub_pending_join_v1';
+const PENDING_GOOGLE_PHONE_KEY = 'rallyhub_pending_google_phone_v1';
 
-function readStoredPendingJoin(): { code: string; displayName: string | null } | null {
+function readStoredPendingJoin(): PendingJoinRequest | null {
   try {
     const raw = sessionStorage.getItem(PENDING_JOIN_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { code?: unknown; displayName?: unknown };
+    const parsed = JSON.parse(raw) as {
+      code?: unknown;
+      displayName?: unknown;
+      phoneNumber?: unknown;
+      switchGroupId?: unknown;
+    };
     if (typeof parsed.code === 'string' && parsed.code.trim()) {
       return {
         code: parsed.code.trim(),
         displayName:
           typeof parsed.displayName === 'string' && parsed.displayName.trim()
             ? parsed.displayName.trim()
+            : null,
+        phoneNumber:
+          typeof parsed.phoneNumber === 'string' && parsed.phoneNumber.trim()
+            ? parsed.phoneNumber.trim()
+            : null,
+        switchGroupId:
+          typeof parsed.switchGroupId === 'string' && parsed.switchGroupId.trim()
+            ? parsed.switchGroupId.trim()
             : null,
       };
     }
@@ -77,7 +119,7 @@ function readStoredPendingJoin(): { code: string; displayName: string | null } |
   return null;
 }
 
-function writeStoredPendingJoin(join: { code: string; displayName: string | null } | null): void {
+function writeStoredPendingJoin(join: PendingJoinRequest | null): void {
   try {
     if (!join) {
       sessionStorage.removeItem(PENDING_JOIN_STORAGE_KEY);
@@ -89,31 +131,71 @@ function writeStoredPendingJoin(join: { code: string; displayName: string | null
   }
 }
 
+function readStoredPendingGooglePhone(): string | null {
+  try {
+    const val = sessionStorage.getItem(PENDING_GOOGLE_PHONE_KEY);
+    return val && E164_PHONE_REGEX.test(val) ? val : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPendingGooglePhone(phone: string | null): void {
+  try {
+    if (!phone) {
+      sessionStorage.removeItem(PENDING_GOOGLE_PHONE_KEY);
+    } else {
+      sessionStorage.setItem(PENDING_GOOGLE_PHONE_KEY, phone);
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
 export function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [guestSession, setGuestSession] = useState<GuestSession | null>(() =>
+    getStoredGuestSession()
+  );
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [showApkAuthHelp, setShowApkAuthHelp] = useState(() => isEmbeddedWebView());
-  const [pendingJoin, setPendingJoin] = useState<{
-    code: string;
-    displayName: string | null;
-  } | null>(() => readStoredPendingJoin());
+  const [pendingJoin, setPendingJoin] = useState<PendingJoinRequest | null>(() =>
+    readStoredPendingJoin()
+  );
+  const [pendingGooglePhone, setPendingGooglePhone] = useState<string | null>(() =>
+    readStoredPendingGooglePhone()
+  );
 
-  const [isDarkMode, setIsDarkMode] = useState(() =>
+  const [systemDark, setSystemDark] = useState(() =>
     typeof window !== 'undefined' &&
     window.matchMedia('(prefers-color-scheme: dark)').matches
   );
+  const [deviceAppearance, setDeviceAppearance] = useState<PersonalAppearance>(() =>
+    readStoredPersonalAppearance(null)
+  );
 
-  // Sync Tailwind dark class with system preference
+  // Track OS dark mode preference
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
-    document.documentElement.classList.toggle('dark', media.matches);
     const onChange = (e: MediaQueryListEvent) => {
-      document.documentElement.classList.toggle('dark', e.matches);
-      setIsDarkMode(e.matches);
+      setSystemDark(e.matches);
     };
     media.addEventListener('change', onChange);
     return () => media.removeEventListener('change', onChange);
+  }, []);
+
+  useEffect(() => {
+    return subscribeStoredPersonalAppearance(null, (next) => {
+      setDeviceAppearance(next);
+    });
+  }, []);
+
+  // Keep guest session reactive across tabs & storage updates
+  useEffect(() => {
+    return subscribeGuestSession((nextSession) => {
+      setGuestSession(nextSession);
+    });
   }, []);
 
   useEffect(() => {
@@ -124,6 +206,8 @@ export function App() {
         if (result?.user) {
           const restored = readStoredPendingJoin();
           if (restored) setPendingJoin(restored);
+          const restoredPhone = readStoredPendingGooglePhone();
+          if (restoredPhone) setPendingGooglePhone(restoredPhone);
         }
       })
       .catch((err) => {
@@ -147,14 +231,18 @@ export function App() {
   }, []);
 
   const triggerRedirectSignIn = useCallback(
-    async (nextPendingJoin: { code: string; displayName: string | null } | null) => {
+    async (nextPendingJoin: PendingJoinRequest | null, phoneNumber?: string) => {
       setAuthError(null);
       if (isUnsupportedSchemeForFirebaseAuth()) {
         setShowApkAuthHelp(true);
         setAuthError(
-          'Google Sign-In cannot run from a local file:// or custom APK scheme. Load the hosted HTTPS app URL in Chrome or package the app as a Trusted Web Activity (TWA).'
+          'Google Sign-In cannot run from a local file:// or custom APK scheme. Join with a Group Code + Name + Cell Phone above, or open the hosted HTTPS app URL in Chrome.'
         );
         return;
+      }
+      if (phoneNumber && E164_PHONE_REGEX.test(phoneNumber)) {
+        writeStoredPendingGooglePhone(phoneNumber);
+        setPendingGooglePhone(phoneNumber);
       }
       writeStoredPendingJoin(nextPendingJoin);
       try {
@@ -171,19 +259,26 @@ export function App() {
   );
 
   const handleGoogleSignIn = useCallback(
-    async (nextPendingJoin: { code: string; displayName: string | null } | null) => {
+    async (nextPendingJoin: PendingJoinRequest | null, phoneNumber?: string) => {
       setAuthError(null);
+      const validPhone =
+        phoneNumber && E164_PHONE_REGEX.test(phoneNumber) ? phoneNumber : undefined;
+      if (validPhone) {
+        writeStoredPendingGooglePhone(validPhone);
+        setPendingGooglePhone(validPhone);
+      }
+
       if (isUnsupportedSchemeForFirebaseAuth()) {
         setShowApkAuthHelp(true);
         setAuthError(
-          'Google Sign-In cannot run from a local file:// or custom APK scheme. Load the hosted HTTPS app URL in Chrome or package the app as a Trusted Web Activity (TWA).'
+          'Google Sign-In cannot run from a local file:// or custom APK scheme. Join with a Group Code + Name + Cell Phone above, or load the hosted HTTPS URL in Chrome.'
         );
         return;
       }
 
       if (isEmbeddedWebView()) {
         setShowApkAuthHelp(true);
-        await triggerRedirectSignIn(nextPendingJoin);
+        await triggerRedirectSignIn(nextPendingJoin, validPhone);
         return;
       }
 
@@ -191,7 +286,9 @@ export function App() {
         await signInWithPopup(auth, googleProvider);
       } catch (err) {
         const code =
-          err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
+          err && typeof err === 'object' && 'code' in err
+            ? String((err as { code: unknown }).code)
+            : '';
         if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
           setPendingJoin(null);
           writeStoredPendingJoin(null);
@@ -202,7 +299,7 @@ export function App() {
           code === 'auth/operation-not-supported-in-this-environment'
         ) {
           setShowApkAuthHelp(true);
-          await triggerRedirectSignIn(nextPendingJoin);
+          await triggerRedirectSignIn(nextPendingJoin, validPhone);
           return;
         }
         setPendingJoin(null);
@@ -215,34 +312,112 @@ export function App() {
     [triggerRedirectSignIn]
   );
 
+  const handleJoinWithCodeDirect = useCallback(
+    async (code: string, displayName: string, phoneNumber: string) => {
+      setAuthError(null);
+      const normalizedPhone = normalizePhoneInput(phoneNumber);
+      const existingGuest = getStoredGuestSession();
+      const hadExistingGroups = Boolean(existingGuest && existingGuest.joinedGroups.length > 0);
+
+      ensureGuestSession(displayName.trim(), normalizedPhone);
+      try {
+        const groupId = await repo.joinGroupByCode(code, displayName.trim(), normalizedPhone);
+        setGuestSession(getStoredGuestSession());
+        setPendingJoin({
+          code,
+          displayName: displayName.trim(),
+          phoneNumber: normalizedPhone,
+          switchGroupId: groupId,
+        });
+      } catch (err) {
+        if (!hadExistingGroups && !auth.currentUser) {
+          clearGuestSession();
+          setGuestSession(null);
+        }
+        setAuthError(getFriendlyErrorMessage(err, 'Could not join group with that code'));
+      }
+    },
+    []
+  );
+
   const handleJoinWithCodeWithGoogle = useCallback(
-    async (code: string, displayName: string) => {
-      const nextJoin = {
+    async (code: string, displayName: string, phoneNumber?: string) => {
+      const nextJoin: PendingJoinRequest = {
         code,
         displayName: displayName.trim() || null,
+        phoneNumber: phoneNumber ?? null,
       };
       setPendingJoin(nextJoin);
-      await handleGoogleSignIn(nextJoin);
+      await handleGoogleSignIn(nextJoin, phoneNumber);
     },
     [handleGoogleSignIn]
   );
 
-  const handleStandardGoogleSignIn = useCallback(async () => {
-    setPendingJoin(null);
-    writeStoredPendingJoin(null);
-    await handleGoogleSignIn(null);
-  }, [handleGoogleSignIn]);
+  const handleStandardGoogleSignIn = useCallback(
+    async (phoneNumber?: string) => {
+      setPendingJoin(null);
+      writeStoredPendingJoin(null);
+      await handleGoogleSignIn(null, phoneNumber);
+    },
+    [handleGoogleSignIn]
+  );
 
-  const handleRedirectGoogleSignIn = useCallback(async () => {
-    await triggerRedirectSignIn(pendingJoin);
-  }, [pendingJoin, triggerRedirectSignIn]);
+  const handleRedirectGoogleSignIn = useCallback(
+    async (phoneNumber?: string) => {
+      await triggerRedirectSignIn(pendingJoin, phoneNumber);
+    },
+    [pendingJoin, triggerRedirectSignIn]
+  );
 
   const handleSignOut = useCallback(async () => {
     setPendingJoin(null);
     writeStoredPendingJoin(null);
+    setPendingGooglePhone(null);
+    writeStoredPendingGooglePhone(null);
     setAuthError(null);
-    await signOut(auth);
+    clearGuestSession();
+    setGuestSession(null);
+    if (auth.currentUser) {
+      await signOut(auth);
+    }
   }, []);
+
+  const identity: WorkspaceIdentity | null = useMemo(() => {
+    if (user) {
+      return {
+        uid: user.uid,
+        displayName: user.displayName,
+        email: user.email,
+        isGuest: false,
+      };
+    }
+    if (guestSession) {
+      return {
+        uid: guestSession.uid,
+        displayName: guestSession.displayName,
+        email: null,
+        isGuest: true,
+        phoneNumber: guestSession.phoneNumber,
+      };
+    }
+    return null;
+  }, [user, guestSession]);
+
+  const unauthEffectiveDark =
+    deviceAppearance.colorMode === 'dark'
+      ? true
+      : deviceAppearance.colorMode === 'light'
+        ? false
+        : systemDark;
+
+  useEffect(() => {
+    if (identity) return;
+    document.documentElement.classList.toggle('dark', unauthEffectiveDark);
+    const vars = getThemeCssVariables(deviceAppearance.colorTheme, unauthEffectiveDark);
+    for (const [k, v] of Object.entries(vars)) {
+      document.documentElement.style.setProperty(k, v);
+    }
+  }, [identity, deviceAppearance.colorTheme, unauthEffectiveDark]);
 
   if (!authReady) {
     return (
@@ -255,28 +430,46 @@ export function App() {
     );
   }
 
-  if (!user) {
+  if (!identity) {
     return (
       <AuthAndJoinScreen
+        onJoinWithCodeDirect={handleJoinWithCodeDirect}
         onJoinWithCodeWithGoogle={handleJoinWithCodeWithGoogle}
         onStandardGoogleSignIn={handleStandardGoogleSignIn}
         onRedirectGoogleSignIn={handleRedirectGoogleSignIn}
         showApkHelp={showApkAuthHelp}
         authError={authError}
         onClearError={() => setAuthError(null)}
+        appearance={deviceAppearance}
+        isDarkMode={unauthEffectiveDark}
+        onUpdateAppearance={(patch) => {
+          const next = sanitizePersonalAppearance({ ...deviceAppearance, ...patch });
+          setDeviceAppearance(writeStoredPersonalAppearance(null, next));
+        }}
+        onResetAppearance={() => {
+          setDeviceAppearance(writeStoredPersonalAppearance(null, DEFAULT_PERSONAL_APPEARANCE));
+        }}
       />
     );
   }
 
   return (
     <CloudWorkspaceHost
-      key={user.uid}
-      user={user}
-      isDarkMode={isDarkMode}
+      key={identity.uid}
+      identity={identity}
+      systemDark={systemDark}
       pendingJoin={pendingJoin}
+      pendingGooglePhone={pendingGooglePhone}
       onPendingJoinConsumed={() => {
         writeStoredPendingJoin(null);
         setPendingJoin(null);
+      }}
+      onPendingGooglePhoneConsumed={() => {
+        writeStoredPendingGooglePhone(null);
+        setPendingGooglePhone(null);
+      }}
+      onRequestGoogleSignIn={(carryPhone?: string) => {
+        void handleStandardGoogleSignIn(carryPhone);
       }}
       onSignOut={() => void handleSignOut()}
     />
@@ -284,24 +477,66 @@ export function App() {
 }
 
 function CloudWorkspaceHost({
-  user,
-  isDarkMode,
+  identity,
+  systemDark,
   pendingJoin,
+  pendingGooglePhone,
   onPendingJoinConsumed,
+  onPendingGooglePhoneConsumed,
+  onRequestGoogleSignIn,
   onSignOut,
 }: {
-  user: User;
-  isDarkMode: boolean;
-  pendingJoin: { code: string; displayName: string | null } | null;
+  identity: WorkspaceIdentity;
+  systemDark: boolean;
+  pendingJoin: PendingJoinRequest | null;
+  pendingGooglePhone: string | null;
   onPendingJoinConsumed: () => void;
+  onPendingGooglePhoneConsumed: () => void;
+  onRequestGoogleSignIn: (carryPhone?: string) => void;
   onSignOut: () => void;
 }) {
-  const { state, actions } = useRallyWorkspace(user, pendingJoin, onPendingJoinConsumed);
+  const handleUpgradeToGoogle = useCallback(() => {
+    const carryPhone = getStoredGuestSession()?.phoneNumber || identity.phoneNumber || undefined;
+    onRequestGoogleSignIn(carryPhone);
+  }, [identity.phoneNumber, onRequestGoogleSignIn]);
+
+  const { state, actions } = useRallyWorkspace(
+    identity,
+    pendingJoin,
+    onPendingJoinConsumed,
+    handleUpgradeToGoogle
+  );
   const ai = useAiCoordinator();
 
   const [selectedTab, setSelectedTab] = useState<HubTab>('dashboard');
   const [adminSubTab, setAdminSubTab] = useState<AdminPanelSubTab>('controls');
   const [showAiSheet, setShowAiSheet] = useState(false);
+  const [showAppearanceModal, setShowAppearanceModal] = useState(false);
+
+  // Auto-apply phone number entered prior to Google Sign-In
+  const appliedGooglePhoneRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (state.isGuest || !pendingGooglePhone) return;
+    if (appliedGooglePhoneRef.current === pendingGooglePhone) return;
+    appliedGooglePhoneRef.current = pendingGooglePhone;
+    void actions
+      .saveSmsPreferences({
+        phone: pendingGooglePhone,
+        enabled: true,
+        forMessages: true,
+        forEvents: true,
+      })
+      .finally(() => {
+        onPendingGooglePhoneConsumed();
+      });
+  }, [state.isGuest, pendingGooglePhone, actions, onPendingGooglePhoneConsumed]);
+
+  const needsGooglePhoneOnboarding =
+    !state.isGuest &&
+    state.smsPrefsLoaded &&
+    !state.smsPreferences.phone &&
+    !pendingGooglePhone &&
+    !pendingJoin?.phoneNumber;
 
   const visibleTabs = useMemo(() => {
     if (ROLE_META[state.currentRole].canAccessAdminPanel) {
@@ -322,19 +557,48 @@ function CloudWorkspaceHost({
     return () => window.clearTimeout(timer);
   }, [state.bannerMessage, actions]);
 
+  const effectiveDark =
+    state.personalAppearance.colorMode === 'dark'
+      ? true
+      : state.personalAppearance.colorMode === 'light'
+        ? false
+        : systemDark;
+
+  const themeVars = useMemo(
+    () => getThemeCssVariables(state.personalAppearance.colorTheme, effectiveDark),
+    [state.personalAppearance.colorTheme, effectiveDark]
+  );
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', effectiveDark);
+    for (const [k, v] of Object.entries(themeVars)) {
+      document.documentElement.style.setProperty(k, v);
+    }
+  }, [effectiveDark, themeVars]);
+
   const appBg = useMemo(
-    () => getAppBackgroundPresentation(state.appBackground, isDarkMode),
-    [state.appBackground, isDarkMode]
+    () =>
+      getAppBackgroundPresentation(
+        state.personalAppearance.appBackground,
+        effectiveDark,
+        state.personalAppearance.colorTheme
+      ),
+    [
+      state.personalAppearance.appBackground,
+      effectiveDark,
+      state.personalAppearance.colorTheme,
+    ]
   );
 
   const rootStyle = useMemo(
     () =>
       ({
+        ...themeVars,
         ...appBg.style,
         '--rally-canvas-text': appBg.isDarkCanvas ? '#F1F5F9' : '#111827',
         '--rally-canvas-text-muted': appBg.isDarkCanvas ? '#CBD5E1' : '#4B5565',
       }) as React.CSSProperties,
-    [appBg]
+    [themeVars, appBg]
   );
 
   return (
@@ -371,6 +635,28 @@ function CloudWorkspaceHost({
 
               <div className="flex shrink-0 items-center gap-1.5">
                 <OfflineStatusBadge />
+                {state.isGuest && (
+                  <button
+                    type="button"
+                    onClick={() => actions.requestGoogleSignIn()}
+                    data-testid="topbar_google_signin_button"
+                    title="Sign in with Google to unlock organizer/admin features"
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-primary)]/40 bg-[var(--rally-surface)] px-2.5 py-1.5 text-xs font-semibold text-[var(--rally-primary)] transition hover:bg-[var(--rally-primary-container)]/45"
+                  >
+                    <LogIn className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">Google Sign-In</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowAppearanceModal(true)}
+                  data-testid="topbar_appearance_button"
+                  title="Customize your personal colors and background"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-2.5 py-1.5 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)]"
+                >
+                  <Palette className="h-3.5 w-3.5 text-[var(--rally-primary)]" />
+                  <span className="hidden sm:inline">My Theme</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => setShowAiSheet(true)}
@@ -499,6 +785,37 @@ function CloudWorkspaceHost({
         </div>
       )}
 
+      {/* Personal Colors & Background Modal (Accessible to Every User) */}
+      <PersonalAppearanceModal
+        open={showAppearanceModal}
+        onClose={() => setShowAppearanceModal(false)}
+        appearance={state.personalAppearance}
+        isBusy={state.isBusy}
+        onUpdate={(patch) => void actions.updatePersonalAppearance(patch)}
+        onReset={() => void actions.resetPersonalAppearance()}
+      />
+
+      {/* Required Contact Info Onboarding Modal for Google Users Missing Cell Phone */}
+      {needsGooglePhoneOnboarding && (
+        <GooglePhoneOnboardingModal
+          defaultName={state.currentUserName}
+          email={state.currentUserEmail}
+          isBusy={state.isBusy}
+          onSave={async (name, phone, smsEnabled) => {
+            await actions.saveSmsPreferences(
+              {
+                phone,
+                enabled: smsEnabled,
+                forMessages: true,
+                forEvents: true,
+              },
+              name
+            );
+          }}
+          onSignOut={onSignOut}
+        />
+      )}
+
       {/* In-App Event Reminder Notifications */}
       {state.inAppNotifications.length > 0 && (
         <div
@@ -567,7 +884,7 @@ function CloudWorkspaceHost({
       {state.bannerMessage && (
         <div
           role="status"
-          className="fixed bottom-20 left-1/2 z-50 flex w-[calc(100%-2rem)] max-w-md -translate-x-1/2 items-center justify-between gap-3 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-xl dark:bg-slate-800 md:bottom-6"
+          className="fixed bottom-20 left-1/2 z-[70] flex w-[calc(100%-2rem)] max-w-md -translate-x-1/2 items-center justify-between gap-3 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-xl dark:bg-slate-800 md:bottom-6"
         >
           <span>{state.bannerMessage}</span>
           <button
@@ -581,6 +898,136 @@ function CloudWorkspaceHost({
         </div>
       )}
     </div>
+  );
+}
+
+function GooglePhoneOnboardingModal({
+  defaultName,
+  email,
+  isBusy,
+  onSave,
+  onSignOut,
+}: {
+  defaultName: string;
+  email: string | null;
+  isBusy: boolean;
+  onSave: (name: string, phone: string, smsEnabled: boolean) => Promise<void>;
+  onSignOut: () => void;
+}) {
+  const [nameInput, setNameInput] = useState(defaultName);
+  const [phoneInput, setPhoneInput] = useState('');
+  const [smsEnabled, setSmsEnabled] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const normalizedPhone = phoneInput.trim() ? normalizePhoneInput(phoneInput) : '';
+  const isPhoneValid = E164_PHONE_REGEX.test(normalizedPhone);
+  const canSubmit = !isBusy && nameInput.trim().length >= 2 && isPhoneValid;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (nameInput.trim().length < 2) {
+      setErrorMsg('Please enter your full name (at least 2 characters).');
+      return;
+    }
+    if (!isPhoneValid) {
+      setErrorMsg('Please enter a valid cell phone number (e.g. (555) 123-4567).');
+      return;
+    }
+    setErrorMsg(null);
+    await onSave(nameInput.trim(), normalizedPhone, smsEnabled);
+  };
+
+  return (
+    <ModalDialog
+      open
+      onClose={() => {}}
+      title="Complete Your Contact Info"
+      maxWidthClass="max-w-md"
+      footer={
+        <div className="flex w-full items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="rounded-xl px-3 py-2 text-xs font-semibold text-[var(--rally-on-surface-variant)] hover:bg-[var(--rally-surface-variant)]"
+          >
+            Sign Out
+          </button>
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={(e) => void handleSubmit(e)}
+            data-testid="onboarding_save_phone_button"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-primary)] px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {isBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+            <span>Save &amp; Continue</span>
+          </button>
+        </div>
+      }
+    >
+      <form onSubmit={(e) => void handleSubmit(e)} className="space-y-3.5">
+        <p className="text-xs leading-relaxed text-[var(--rally-on-surface-variant)]">
+          Add your cell phone number so your group&apos;s Creator and Admins can see your contact
+          information and send SMS updates.
+          {email && (
+            <span className="mt-1 block font-medium text-[var(--rally-on-surface)]">
+              Signed in as {email}
+            </span>
+          )}
+        </p>
+
+        {errorMsg && (
+          <div className="rounded-xl bg-[var(--rally-secondary-container)] px-3 py-2 text-xs font-semibold text-[var(--rally-on-secondary-container)]">
+            {errorMsg}
+          </div>
+        )}
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+            Your Full Name <span className="text-[var(--rally-secondary)]">*</span>
+          </label>
+          <input
+            type="text"
+            value={nameInput}
+            onChange={(e) => setNameInput(e.target.value.slice(0, 50))}
+            placeholder="Your full name"
+            data-testid="onboarding_name_input"
+            className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+          />
+        </div>
+
+        <div>
+          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+            Cell Phone Number <span className="text-[var(--rally-secondary)]">*</span>
+          </label>
+          <div className="relative">
+            <Phone className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--rally-on-surface-variant)]" />
+            <input
+              type="tel"
+              value={phoneInput}
+              onChange={(e) => setPhoneInput(e.target.value.slice(0, 24))}
+              placeholder="(555) 123-4567"
+              data-testid="onboarding_phone_input"
+              className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] py-2.5 pl-9 pr-3.5 font-mono-code text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+            />
+          </div>
+          <p className="mt-1 text-[11px] text-[var(--rally-on-surface-variant)]">
+            10-digit US numbers auto-format to +1; international numbers start with +.
+          </p>
+        </div>
+
+        <label className="flex cursor-pointer items-center justify-between gap-2 rounded-2xl border border-[var(--rally-outline)]/60 bg-[var(--rally-surface-variant)]/30 p-3 text-xs font-semibold">
+          <span>Enable SMS text updates for events &amp; announcements</span>
+          <input
+            type="checkbox"
+            checked={smsEnabled}
+            onChange={(e) => setSmsEnabled(e.target.checked)}
+            data-testid="onboarding_sms_toggle"
+            className="h-4 w-4 accent-[var(--rally-primary)]"
+          />
+        </label>
+      </form>
+    </ModalDialog>
   );
 }
 

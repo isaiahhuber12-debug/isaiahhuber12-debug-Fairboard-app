@@ -244,6 +244,24 @@ export interface GroupMember {
   updatedAtMs: number;
 }
 
+export interface MemberContactInfo {
+  uid: string;
+  displayName: string;
+  phoneNumber: string;
+  email?: string | null;
+  authMethod: 'GOOGLE' | 'CODE_GUEST';
+  smsEnabled: boolean;
+  updatedAtMs: number;
+}
+
+export interface WorkspaceIdentity {
+  uid: string;
+  displayName: string | null;
+  email: string | null;
+  isGuest: boolean;
+  phoneNumber?: string | null;
+}
+
 export interface RallyEvent {
   id: string;
   title: string;
