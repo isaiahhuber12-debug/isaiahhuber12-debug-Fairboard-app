@@ -380,12 +380,45 @@ export interface EngagementAnalytics {
   fillRatePercent: number;
 }
 
+export enum PollStatus {
+  OPEN = 'OPEN',
+  CLOSED = 'CLOSED',
+}
+
+export function parsePollStatus(raw?: string | null): PollStatus {
+  if (!raw) return PollStatus.OPEN;
+  return raw.toUpperCase() === PollStatus.CLOSED ? PollStatus.CLOSED : PollStatus.OPEN;
+}
+
+export interface GroupPoll {
+  id: string;
+  question: string;
+  description?: string | null;
+  options: string[];
+  optionCounts: number[];
+  totalVotes: number;
+  status: PollStatus;
+  createdBy: string;
+  createdByName: string;
+  createdByRole: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface PollBallot {
+  id: string;
+  userId: string;
+  displayName: string;
+  optionIndex: number;
+  createdAtMs: number;
+}
+
 export type AsyncDataState<T> =
   | { status: 'loading' }
   | { status: 'success'; data: T }
   | { status: 'error'; message: string };
 
-export type HubTab = 'dashboard' | 'calendar' | 'chats' | 'alerts' | 'admin';
+export type HubTab = 'dashboard' | 'calendar' | 'polls' | 'chats' | 'alerts' | 'admin';
 
 export interface AiChatMessage {
   id: string;

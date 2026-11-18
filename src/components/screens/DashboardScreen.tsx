@@ -55,12 +55,14 @@ import {
 import { ActivityLog } from '../ActivityLog';
 import { PersonalAppearanceModal } from '../BackgroundCustomizerCard';
 import { GroupSmsComposerModal } from '../GroupSmsComposerModal';
+import { GroupPollsSection } from '../GroupPollsSection';
 import { QrInviteShareButton } from '../QrInviteShareModal';
 
 interface DashboardScreenProps {
   state: RallyWorkspaceState;
   actions: RallyWorkspaceActions;
   onOpenEvent: (eventId: string) => void;
+  onOpenPolls?: () => void;
   onOpenNotifications: () => void;
   onOpenAiCoordinator: () => void;
   onOpenAdminPanel?: () => void;
@@ -71,6 +73,7 @@ export function DashboardScreen({
   state,
   actions,
   onOpenEvent,
+  onOpenPolls,
   onOpenNotifications,
   onOpenAiCoordinator,
   onOpenAdminPanel,
@@ -436,6 +439,14 @@ export function DashboardScreen({
           )}
         </div>
       )}
+
+      {/* Group Polls (Compact Dashboard Preview) */}
+      <GroupPollsSection
+        state={state}
+        actions={actions}
+        compact
+        onOpenPollsTab={onOpenPolls}
+      />
 
       {/* Upcoming Events */}
       <section className="space-y-2.5 pt-1">

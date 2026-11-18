@@ -349,6 +349,103 @@ service cloud.firestore {
              data.createdAt == request.time;
     }
 
+    // --- Poll & Ballot Schema Validators ---
+
+    function pollPath(groupId, pollId) {
+      return /databases/$(database)/documents/groups/$(groupId)/polls/$(pollId);
+    }
+
+    function ballotPath(groupId, pollId, uid) {
+      return /databases/$(database)/documents/groups/$(groupId)/polls/$(pollId)/ballots/$(uid);
+    }
+
+    function isValidPollOptionAt(options, idx) {
+      return options.size() <= idx ||
+             (options[idx] is string && options[idx].size() >= 1 && options[idx].size() <= 120);
+    }
+
+    function isValidPollCountAt(counts, idx) {
+      return counts.size() <= idx ||
+             (counts[idx] is int && counts[idx] >= 0 && counts[idx] <= 100000);
+    }
+
+    function isValidZeroPollCounts(counts) {
+      return counts.size() >= 2 &&
+             counts[0] == 0 &&
+             counts[1] == 0 &&
+             (counts.size() <= 2 || counts[2] == 0) &&
+             (counts.size() <= 3 || counts[3] == 0) &&
+             (counts.size() <= 4 || counts[4] == 0) &&
+             (counts.size() <= 5 || counts[5] == 0) &&
+             (counts.size() <= 6 || counts[6] == 0) &&
+             (counts.size() <= 7 || counts[7] == 0) &&
+             (counts.size() <= 8 || counts[8] == 0) &&
+             (counts.size() <= 9 || counts[9] == 0);
+    }
+
+    function isValidOptionCountVote(existingCounts, incomingCounts, votedIdx) {
+      return incomingCounts.size() == existingCounts.size() &&
+             votedIdx is int &&
+             votedIdx >= 0 &&
+             votedIdx < existingCounts.size() &&
+             incomingCounts[votedIdx] == existingCounts[votedIdx] + 1 &&
+             (existingCounts.size() <= 0 || votedIdx == 0 || incomingCounts[0] == existingCounts[0]) &&
+             (existingCounts.size() <= 1 || votedIdx == 1 || incomingCounts[1] == existingCounts[1]) &&
+             (existingCounts.size() <= 2 || votedIdx == 2 || incomingCounts[2] == existingCounts[2]) &&
+             (existingCounts.size() <= 3 || votedIdx == 3 || incomingCounts[3] == existingCounts[3]) &&
+             (existingCounts.size() <= 4 || votedIdx == 4 || incomingCounts[4] == existingCounts[4]) &&
+             (existingCounts.size() <= 5 || votedIdx == 5 || incomingCounts[5] == existingCounts[5]) &&
+             (existingCounts.size() <= 6 || votedIdx == 6 || incomingCounts[6] == existingCounts[6]) &&
+             (existingCounts.size() <= 7 || votedIdx == 7 || incomingCounts[7] == existingCounts[7]) &&
+             (existingCounts.size() <= 8 || votedIdx == 8 || incomingCounts[8] == existingCounts[8]) &&
+             (existingCounts.size() <= 9 || votedIdx == 9 || incomingCounts[9] == existingCounts[9]);
+    }
+
+    function isValidPoll(data) {
+      return data.keys().hasAll(['question', 'options', 'optionCounts', 'totalVotes', 'status', 'createdBy', 'createdByName', 'createdByRole', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['question', 'description', 'options', 'optionCounts', 'totalVotes', 'status', 'createdBy', 'createdByName', 'createdByRole', 'createdAt', 'updatedAt']) &&
+             data.question is string && data.question.size() >= 2 && data.question.size() <= 240 &&
+             (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 500)) &&
+             data.options is list && data.options.size() >= 2 && data.options.size() <= 10 &&
+             data.options[0] is string && data.options[0].size() >= 1 && data.options[0].size() <= 120 &&
+             data.options[1] is string && data.options[1].size() >= 1 && data.options[1].size() <= 120 &&
+             isValidPollOptionAt(data.options, 2) &&
+             isValidPollOptionAt(data.options, 3) &&
+             isValidPollOptionAt(data.options, 4) &&
+             isValidPollOptionAt(data.options, 5) &&
+             isValidPollOptionAt(data.options, 6) &&
+             isValidPollOptionAt(data.options, 7) &&
+             isValidPollOptionAt(data.options, 8) &&
+             isValidPollOptionAt(data.options, 9) &&
+             data.optionCounts is list && data.optionCounts.size() == data.options.size() &&
+             data.optionCounts[0] is int && data.optionCounts[0] >= 0 && data.optionCounts[0] <= 100000 &&
+             data.optionCounts[1] is int && data.optionCounts[1] >= 0 && data.optionCounts[1] <= 100000 &&
+             isValidPollCountAt(data.optionCounts, 2) &&
+             isValidPollCountAt(data.optionCounts, 3) &&
+             isValidPollCountAt(data.optionCounts, 4) &&
+             isValidPollCountAt(data.optionCounts, 5) &&
+             isValidPollCountAt(data.optionCounts, 6) &&
+             isValidPollCountAt(data.optionCounts, 7) &&
+             isValidPollCountAt(data.optionCounts, 8) &&
+             isValidPollCountAt(data.optionCounts, 9) &&
+             data.totalVotes is int && data.totalVotes >= 0 && data.totalVotes <= 100000 &&
+             data.status in ['OPEN', 'CLOSED'] &&
+             isValidId(data.createdBy) &&
+             data.createdByName is string && data.createdByName.size() >= 1 && data.createdByName.size() <= 60 &&
+             data.createdByRole in ['CREATOR', 'ADMIN', 'ORGANIZER'] &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPollBallot(data) {
+      return data.keys().hasAll(['userId', 'displayName', 'optionIndex', 'createdAt']) &&
+             data.keys().hasOnly(['userId', 'displayName', 'optionIndex', 'createdAt']) &&
+             isValidId(data.userId) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             data.optionIndex is int && data.optionIndex >= 0 && data.optionIndex < 10 &&
+             isValidTimestamp(data.createdAt);
+    }
+
     // --- Collection Rules ---
 
     match /admins/{uid} {
@@ -788,6 +885,96 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isSignedIn() && isValidId(logId) &&
                          (isGroupAdminOrCreator(groupId) || isGlobalAdmin());
+      }
+
+      match /polls/{pollId} {
+        allow get, list: if isSignedIn()
+                            ? (isGroupMember(groupId) || isGroupCreator(groupId) || isGlobalAdmin())
+                            : groupDocExists(groupId);
+        allow create: if isSignedIn() && isValidId(pollId) &&
+                         isValidPoll(incoming()) &&
+                         incoming().createdBy == request.auth.uid &&
+                         incoming().status == 'OPEN' &&
+                         incoming().totalVotes == 0 &&
+                         isValidZeroPollCounts(incoming().optionCounts) &&
+                         incoming().createdAt == request.time &&
+                         incoming().updatedAt == request.time &&
+                         (isGroupOrganizerOrHigher(groupId) || isGlobalAdmin());
+        allow update: if isValidId(pollId) &&
+                         isValidPoll(incoming()) &&
+                         incoming().question == existing().question &&
+                         ((!('description' in existing()) && !('description' in incoming())) ||
+                          (('description' in existing()) && ('description' in incoming()) && incoming().description == existing().description)) &&
+                         incoming().options == existing().options &&
+                         incoming().createdBy == existing().createdBy &&
+                         incoming().createdByName == existing().createdByName &&
+                         incoming().createdByRole == existing().createdByRole &&
+                         incoming().createdAt == existing().createdAt && (
+                           // Action 1: Signed-in group member votes once atomically with ballot doc
+                           (isSignedIn() &&
+                            (isGroupMember(groupId) || isGroupCreator(groupId)) &&
+                            existing().status == 'OPEN' &&
+                            incoming().status == existing().status &&
+                            incoming().totalVotes == existing().totalVotes + 1 &&
+                            incoming().updatedAt == request.time &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['optionCounts', 'totalVotes', 'updatedAt']) &&
+                            !exists(ballotPath(groupId, pollId, request.auth.uid)) &&
+                            existsAfter(ballotPath(groupId, pollId, request.auth.uid)) &&
+                            isValidOptionCountVote(
+                              existing().optionCounts,
+                              incoming().optionCounts,
+                              getAfter(ballotPath(groupId, pollId, request.auth.uid)).data.optionIndex
+                            )) ||
+                           // Action 2: Code-joined guest member votes once
+                           (request.auth == null &&
+                            groupDocExists(groupId) &&
+                            existing().status == 'OPEN' &&
+                            incoming().status == existing().status &&
+                            incoming().totalVotes == existing().totalVotes + 1 &&
+                            incoming().optionCounts.size() == existing().optionCounts.size() &&
+                            incoming().updatedAt == request.time &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['optionCounts', 'totalVotes', 'updatedAt'])) ||
+                           // Action 3: Organizer, Admin, or Creator closes (or Creator/Admin reopens) poll
+                           (isSignedIn() &&
+                            (isGroupOrganizerOrHigher(groupId) || isGlobalAdmin()) &&
+                            (existing().status == 'OPEN' || isGroupAdminOrCreator(groupId) || isGlobalAdmin()) &&
+                            incoming().updatedAt == request.time &&
+                            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+                         );
+        allow delete: if isSignedIn() && isValidId(pollId) &&
+                         (isGroupAdminOrCreator(groupId) || existing().createdBy == request.auth.uid || isGlobalAdmin());
+
+        // Strict Anonymity Guarantee:
+        // Regular members and regular admins can only read their OWN ballot (if signed in) and CANNOT list ballots.
+        // Only the Group Creator (ownerId) can list/read all ballots for Creator View.
+        match /ballots/{userId} {
+          allow get: if isSignedIn() && isValidId(pollId) && isValidId(userId) &&
+                        (request.auth.uid == userId || isGroupCreator(groupId));
+          allow list: if isSignedIn() && isGroupCreator(groupId);
+          allow create: if isValidId(pollId) && isValidId(userId) &&
+                           isValidPollBallot(incoming()) &&
+                           incoming().userId == userId &&
+                           incoming().createdAt == request.time &&
+                           exists(pollPath(groupId, pollId)) &&
+                           get(pollPath(groupId, pollId)).data.status == 'OPEN' &&
+                           incoming().optionIndex < get(pollPath(groupId, pollId)).data.options.size() &&
+                           !exists(ballotPath(groupId, pollId, userId)) &&
+                           getAfter(pollPath(groupId, pollId)).data.totalVotes == get(pollPath(groupId, pollId)).data.totalVotes + 1 &&
+                           getAfter(pollPath(groupId, pollId)).data.optionCounts[incoming().optionIndex] == get(pollPath(groupId, pollId)).data.optionCounts[incoming().optionIndex] + 1 &&
+                           (
+                             (isSignedIn() &&
+                              request.auth.uid == userId &&
+                              (isGroupMember(groupId) || isGroupCreator(groupId))) ||
+                             (request.auth == null &&
+                              isGuestId(userId) &&
+                              exists(memberPath(groupId, userId)))
+                           );
+          allow update: if false;
+          allow delete: if isSignedIn() && isValidId(pollId) && isValidId(userId) &&
+                           (isGroupAdminOrCreator(groupId) ||
+                            isGlobalAdmin() ||
+                            (exists(pollPath(groupId, pollId)) && get(pollPath(groupId, pollId)).data.createdBy == request.auth.uid));
+        }
       }
     }
   }

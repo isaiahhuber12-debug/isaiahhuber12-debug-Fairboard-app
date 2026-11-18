@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BarChart3,
   Bell,
   BellRing,
   Calendar,
@@ -65,6 +66,7 @@ import { AuthAndJoinScreen } from './components/screens/AuthAndJoinScreen';
 import { CloudGroupHubScreen } from './components/screens/CloudGroupHubScreen';
 import { DashboardScreen } from './components/screens/DashboardScreen';
 import { CalendarScreen } from './components/screens/CalendarScreen';
+import { PollsScreen } from './components/screens/PollsScreen';
 import { ChatsScreen } from './components/screens/ChatsScreen';
 import { NotificationsScreen } from './components/screens/NotificationsScreen';
 import { AdminPanelScreen, type AdminPanelSubTab } from './components/screens/AdminPanelScreen';
@@ -79,6 +81,7 @@ interface NavTabItem {
 const ALL_TABS: NavTabItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'calendar', label: 'Calendar', icon: Calendar },
+  { id: 'polls', label: 'Polls', icon: BarChart3 },
   { id: 'chats', label: 'Chats', icon: MessageSquare },
   { id: 'alerts', label: 'Alerts', icon: Bell },
   { id: 'admin', label: 'Admin', icon: ShieldCheck },
@@ -732,6 +735,7 @@ function CloudWorkspaceHost({
                     actions.selectEvent(eventId);
                     setSelectedTab('calendar');
                   }}
+                  onOpenPolls={() => setSelectedTab('polls')}
                   onOpenNotifications={() => setSelectedTab('alerts')}
                   onOpenAiCoordinator={() => setShowAiSheet(true)}
                   onOpenAdminPanel={() => {
@@ -742,6 +746,7 @@ function CloudWorkspaceHost({
                 />
               )}
               {activeTab === 'calendar' && <CalendarScreen state={state} actions={actions} />}
+              {activeTab === 'polls' && <PollsScreen state={state} actions={actions} />}
               {activeTab === 'chats' && <ChatsScreen state={state} actions={actions} />}
               {activeTab === 'alerts' && (
                 <NotificationsScreen state={state} actions={actions} />
@@ -769,7 +774,7 @@ function CloudWorkspaceHost({
                   type="button"
                   onClick={() => setSelectedTab(tab.id)}
                   data-testid={`nav_${tab.id}`}
-                  className={`flex min-w-[60px] flex-col items-center gap-0.5 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                  className={`flex min-h-[44px] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1.5 text-[11px] font-semibold transition ${
                     active
                       ? 'bg-[var(--rally-primary-container)] text-[var(--rally-on-primary-container)]'
                       : 'text-[var(--rally-on-surface-variant)]'
