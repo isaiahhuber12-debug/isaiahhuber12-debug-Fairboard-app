@@ -25,11 +25,15 @@ import {
   cancelBrowserReminder,
   cancelBrowserReminderAt,
   getEvent30mReminderEpochMs,
+  getNotificationPermission,
   isReminderAt30mSet,
   postBrowserNotification,
+  registerNotificationServiceWorker,
   reminderTimerKey,
+  requestNotificationPermission,
   scheduleBrowserReminder,
 } from '../lib/notifications';
+import * as pushService from '../services/pushService';
 import * as smsService from '../services/smsService';
 import {
   ActivityAction,
@@ -107,8 +111,7 @@ export interface RallyWorkspaceState {
   groupImagesById: Record<string, string | null>;
   smsPreferences: SmsPreferences;
   smsPrefsLoaded: boolean;
-  smsServerConfigured: boolean;
-  smsServerStatus: smsService.SmsServerStatus;
+  phoneNotificationPermission: NotificationPermission | 'unsupported';
   bannerMessage: string | null;
   isBusy: boolean;
 }
@@ -229,18 +232,8 @@ export interface RallyWorkspaceActions {
   dismissInAppNotification: (notificationId: string) => void;
   dismissAllInAppNotifications: () => void;
   saveSmsPreferences: (prefs: SmsPreferences, newDisplayName?: string) => Promise<boolean>;
-  sendTestSms: (phone: string) => Promise<{ ok: boolean; error?: string }>;
-  sendDirectSmsBroadcast: (
-    phones: string[],
-    message: string
-  ) => Promise<{
-    ok: boolean;
-    sentCount: number;
-    failedCount: number;
-    configured: boolean;
-    error?: string;
-  }>;
-  refreshSmsServerStatus: () => Promise<smsService.SmsServerStatus>;
+  enablePhoneNotifications: () => Promise<boolean>;
+  testPhoneNotification: () => Promise<boolean>;
   requestGoogleSignIn: () => void;
   exportAuditLogCsv: (options?: {
     scope?: AuditLogScope;
@@ -335,12 +328,13 @@ export function useRallyWorkspace(
   } | null>(null);
   const [smsPreferences, setSmsPreferences] = useState<SmsPreferences>(DEFAULT_SMS_PREFERENCES);
   const [smsPrefsLoaded, setSmsPrefsLoaded] = useState<boolean>(false);
-  const [smsServerStatus, setSmsServerStatus] = useState<smsService.SmsServerStatus>(
-    smsService.DEFAULT_SMS_SERVER_STATUS
-  );
-  const smsServerConfigured = smsServerStatus.configured || smsServerStatus.secretsPresent;
+  const [phoneNotificationPermission, setPhoneNotificationPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => getNotificationPermission());
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+
+  const activeGroupNameRef = useRef<string | null>(null);
 
   const ensuredCreatorGroupsRef = useRef<Set<string>>(new Set());
   const deletingGroupIdRef = useRef<string | null>(null);
@@ -479,7 +473,7 @@ export function useRallyWorkspace(
     );
   }, [uid]);
 
-  // Observe user SMS preferences & check SMS server availability
+  // Observe user cell phone & contact preferences
   useEffect(() => {
     return repo.subscribeUserSmsPreferences(
       uid,
@@ -493,15 +487,26 @@ export function useRallyWorkspace(
     );
   }, [uid]);
 
+  // Register Service Worker for native phone notifications & keep permission state fresh
   useEffect(() => {
-    let cancelled = false;
-    void smsService.fetchSmsServerStatus().then((res) => {
-      if (!cancelled) setSmsServerStatus(res);
-    });
+    void registerNotificationServiceWorker();
+    const syncPermission = () => {
+      setPhoneNotificationPermission(getNotificationPermission());
+    };
+    window.addEventListener('focus', syncPermission);
+    document.addEventListener('visibilitychange', syncPermission);
     return () => {
-      cancelled = true;
+      window.removeEventListener('focus', syncPermission);
+      document.removeEventListener('visibilitychange', syncPermission);
     };
   }, []);
+
+  // Keep Web Push subscription synced across all joined groups when phone notifications are granted
+  useEffect(() => {
+    if (phoneNotificationPermission !== 'granted') return;
+    if (joinedGroups.length === 0) return;
+    void pushService.syncWebPushSubscription(joinedGroups.map((g) => g.groupId));
+  }, [phoneNotificationPermission, joinedGroups]);
 
   // Observe joined groups
   useEffect(() => {
@@ -606,6 +611,10 @@ export function useRallyWorkspace(
     effectiveGroupId && activeGroupEntry?.groupId === effectiveGroupId
       ? activeGroupEntry.group
       : null;
+
+  useEffect(() => {
+    activeGroupNameRef.current = activeGroup?.name ?? null;
+  }, [activeGroup?.name]);
 
   const membersState: AsyncDataState<GroupMember[]> = useMemo(() => {
     if (!effectiveGroupId) return { status: 'success', data: [] };
@@ -925,10 +934,22 @@ export function useRallyWorkspace(
               seenNotificationsRef.current.add(key);
               if (n.senderId !== uid) {
                 const isPending = parseApprovalStatus(n.approvalStatus) === ApprovalStatus.PENDING;
-                postBrowserNotification(
-                  isPending ? `Approval Needed: ${n.title}` : n.title,
-                  n.body
-                );
+                const canSeePending = ROLE_META[currentRole].canAccessAdminPanel;
+                if (!isPending || canSeePending) {
+                  const groupLabel = activeGroupNameRef.current;
+                  const notifTitle = isPending
+                    ? `Approval Needed: ${n.title}`
+                    : groupLabel
+                      ? `${groupLabel}: ${n.title}`
+                      : n.title;
+                  const notifBody = n.senderName ? `${n.body} — ${n.senderName}` : n.body;
+                  void postBrowserNotification(notifTitle, notifBody, {
+                    tag: `rallyhub-alert-${n.id}`,
+                    groupId: targetGroupId,
+                    notificationId: n.id,
+                    url: '/?tab=alerts',
+                  });
+                }
               }
             }
           }
@@ -1013,7 +1034,7 @@ export function useRallyWorkspace(
   const syncedContactKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!effectiveGroupId || !smsPreferences.phone || !currentUserName.trim()) return;
-    const syncKey = `${effectiveGroupId}:${uid}:${currentUserName}:${smsPreferences.phone}:${smsPreferences.enabled}`;
+    const syncKey = `${effectiveGroupId}:${uid}:${currentUserName}:${smsPreferences.phone}`;
     if (syncedContactKeyRef.current === syncKey) return;
     syncedContactKeyRef.current = syncKey;
     void repo
@@ -1023,7 +1044,7 @@ export function useRallyWorkspace(
         phoneNumber: smsPreferences.phone,
         email: identity.email,
         authMethod: isGuest ? 'CODE_GUEST' : 'GOOGLE',
-        smsEnabled: smsPreferences.enabled,
+        smsEnabled: false,
       })
       .catch(() => {});
   }, [
@@ -1031,7 +1052,6 @@ export function useRallyWorkspace(
     uid,
     currentUserName,
     smsPreferences.phone,
-    smsPreferences.enabled,
     identity.email,
     isGuest,
   ]);
@@ -1061,24 +1081,6 @@ export function useRallyWorkspace(
     if (messagesEntry?.key === subKey) return messagesEntry.state;
     return { status: 'loading' };
   }, [effectiveGroupId, selectedChannelId, messagesEntry]);
-
-  // Keep SMS notification subscriptions synced to server store
-  useEffect(() => {
-    if (joinedGroups.length === 0) return;
-    if (!smsPreferences.phone && !smsPreferences.enabled) return;
-    const memberships = joinedGroups.map((g) => ({
-      groupId: g.groupId,
-      role: g.groupId === activeGroup?.id ? currentRole : g.role,
-    }));
-    void smsService
-      .syncSmsSubscriptionsToServer(memberships, smsPreferences)
-      .then((res) =>
-        setSmsServerStatus((prev) =>
-          prev.configured === res.configured ? prev : { ...prev, configured: res.configured }
-        )
-      )
-      .catch(() => {});
-  }, [joinedGroups, smsPreferences, activeGroup?.id, currentRole]);
 
   const switchGroup = useCallback((groupId: string) => {
     notificationsInitializedRef.current = false;
@@ -1436,18 +1438,6 @@ export function useRallyWorkspace(
             eventId
           );
           setBannerMessage(`Event '${title}' added to calendar`);
-          const optedInPhones = Object.values(memberContactsByUid)
-            .filter((c) => c.uid !== uid && c.smsEnabled && c.phoneNumber)
-            .map((c) => c.phoneNumber);
-          void smsService.dispatchSmsNotification({
-            groupId: activeGroup.id,
-            groupName: activeGroup.name,
-            kind: 'event',
-            title: title.trim(),
-            body: `${formatDateTime(startEpochMs)} @ ${location.trim()}`,
-            senderName: currentUserName,
-            extraPhones: optedInPhones,
-          });
           return true;
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to create event'));
@@ -1488,14 +1478,6 @@ export function useRallyWorkspace(
             eventId
           );
           setBannerMessage(`Event '${title}' updated`);
-          void smsService.dispatchSmsNotification({
-            groupId: activeGroup.id,
-            groupName: activeGroup.name,
-            kind: 'event',
-            title: `Updated: ${title.trim()}`,
-            body: `${formatDateTime(startEpochMs)} @ ${location.trim()}`,
-            senderName: currentUserName,
-          });
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to update event'));
         } finally {
@@ -1761,10 +1743,6 @@ export function useRallyWorkspace(
       },
       sendMessage: async (channelId, text) => {
         if (!activeGroup) return;
-        const targetChannel =
-          channelsState.status === 'success'
-            ? channelsState.data.find((c) => c.id === channelId)
-            : undefined;
         try {
           await repo.sendMessage(
             activeGroup.id,
@@ -1774,15 +1752,6 @@ export function useRallyWorkspace(
             text,
             MessageType.TEXT
           );
-          void smsService.dispatchSmsNotification({
-            groupId: activeGroup.id,
-            groupName: activeGroup.name,
-            kind: 'message',
-            title: targetChannel ? `#${targetChannel.name}` : 'Group Chat',
-            body: text.trim(),
-            senderName: currentUserName,
-            channelAccessLevel: targetChannel?.accessLevel ?? 'ALL',
-          });
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to send message'));
         }
@@ -1855,17 +1824,13 @@ export function useRallyWorkspace(
             notifId
           );
           if (!needsApproval) {
-            const optedInPhones = Object.values(memberContactsByUid)
-              .filter((c) => c.uid !== uid && c.smsEnabled && c.phoneNumber)
-              .map((c) => c.phoneNumber);
-            void smsService.dispatchSmsNotification({
+            void pushService.broadcastAnnouncementPush({
               groupId: activeGroup.id,
               groupName: activeGroup.name,
-              kind: 'event',
+              notificationId: notifId,
               title: title.trim(),
               body: body.trim(),
               senderName: currentUserName,
-              extraPhones: optedInPhones,
             });
           }
           setBannerMessage(
@@ -1940,6 +1905,14 @@ export function useRallyWorkspace(
             existingNotif ? `Submitted by ${existingNotif.senderName}` : null,
             notificationId
           );
+          void pushService.broadcastAnnouncementPush({
+            groupId: activeGroup.id,
+            groupName: activeGroup.name,
+            notificationId,
+            title: existingNotif?.title?.trim() || 'Group Announcement',
+            body: existingNotif?.body?.trim() || 'A new group announcement was posted.',
+            senderName: existingNotif?.senderName ?? currentUserName,
+          });
           setBannerMessage('Announcement approved and posted to everyone!');
         } catch (err) {
           setBannerMessage(getFriendlyErrorMessage(err, 'Failed to approve announcement'));
@@ -2206,109 +2179,82 @@ export function useRallyWorkspace(
           }
           const nextPrefs: SmsPreferences = {
             phone: normalizedPhone,
-            enabled: Boolean(prefs.enabled),
-            forMessages: Boolean(prefs.forMessages),
-            forEvents: Boolean(prefs.forEvents),
+            enabled: false,
+            forMessages: false,
+            forEvents: false,
           };
           await repo.saveUserSmsPreferences(nextPrefs, {
             joinedGroupIds: joinedGroups.map((g) => g.groupId),
             displayName: newDisplayName?.trim() || currentUserName,
           });
-          const memberships = joinedGroups.map((g) => ({
-            groupId: g.groupId,
-            role: g.groupId === activeGroup?.id ? currentRole : g.role,
-          }));
-          const syncRes = await smsService.syncSmsSubscriptionsToServer(memberships, nextPrefs);
-          setSmsServerStatus(syncRes);
           setBannerMessage(
-            nextPrefs.enabled
-              ? `SMS notifications active for ${smsService.formatPhoneDisplay(normalizedPhone)}`
-              : 'Contact & SMS settings saved'
+            normalizedPhone
+              ? `Cell phone number saved (${smsService.formatPhoneDisplay(normalizedPhone)})`
+              : 'Cell phone number cleared'
           );
           return true;
         } catch (err) {
-          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to save SMS preferences'));
+          setBannerMessage(getFriendlyErrorMessage(err, 'Failed to save phone number'));
           return false;
         } finally {
           setIsBusy(false);
         }
       },
-      sendTestSms: async (phone) => {
-        const normalizedPhone = smsService.normalizePhoneInput(phone);
-        if (!smsService.E164_PHONE_REGEX.test(normalizedPhone)) {
-          const msg = 'Enter a valid mobile number (e.g. +15551234567) before testing.';
-          setBannerMessage(msg);
-          return { ok: false, error: msg };
-        }
-        setIsBusy(true);
-        try {
-          await smsService.sendTestSms(normalizedPhone, activeGroup?.name);
-          setSmsServerStatus((prev) => ({
-            ...prev,
-            configured: true,
-            secretsPresent: true,
-            ready: true,
-            configIssue: undefined,
-          }));
-          setBannerMessage(`Test SMS sent to ${smsService.formatPhoneDisplay(normalizedPhone)}`);
-          return { ok: true };
-        } catch (err) {
-          const msg = getFriendlyErrorMessage(err, 'Could not send test SMS');
-          setBannerMessage(msg);
-          void smsService.fetchSmsServerStatus(true).then(setSmsServerStatus);
-          return { ok: false, error: msg };
-        } finally {
-          setIsBusy(false);
-        }
-      },
-      sendDirectSmsBroadcast: async (phones, message) => {
-        setIsBusy(true);
-        try {
-          const res = await smsService.sendDirectCloudSms({
-            phones,
-            message,
-            groupName: activeGroup?.name ?? null,
-          });
-          if (res.sentCount > 0) {
-            setSmsServerStatus((prev) => ({
-              ...prev,
-              configured: res.configured,
-              secretsPresent: res.configured,
-              ready: true,
-              configIssue: undefined,
-            }));
-            setBannerMessage(
-              res.failedCount > 0
-                ? `Sent SMS to ${res.sentCount} number(s); ${res.failedCount} failed`
-                : `Sent SMS to ${res.sentCount} phone ${res.sentCount === 1 ? 'number' : 'numbers'}`
-            );
+      enablePhoneNotifications: async () => {
+        const granted = await requestNotificationPermission();
+        const nextPerm = getNotificationPermission();
+        setPhoneNotificationPermission(nextPerm);
+        if (granted) {
+          if (joinedGroups.length > 0) {
+            await pushService.syncWebPushSubscription(joinedGroups.map((g) => g.groupId));
           }
-          return {
-            ok: res.ok,
-            sentCount: res.sentCount,
-            failedCount: res.failedCount,
-            configured: res.configured,
-            error: res.error,
-          };
-        } catch (err) {
-          const msg = getFriendlyErrorMessage(err, 'Could not send cloud SMS');
-          setBannerMessage(msg);
-          void smsService.fetchSmsServerStatus(true).then(setSmsServerStatus);
-          return {
-            ok: false,
-            sentCount: 0,
-            failedCount: phones.length,
-            configured: smsServerConfigured,
-            error: msg,
-          };
-        } finally {
-          setIsBusy(false);
+          setBannerMessage('Phone notifications enabled for announcements & reminders!');
+          return true;
         }
+        if (nextPerm === 'denied') {
+          setBannerMessage(
+            'Notifications are blocked in your browser settings. Enable them in site settings to get phone alerts.'
+          );
+        } else if (nextPerm === 'unsupported') {
+          setBannerMessage(
+            'System notifications are unavailable in this view. Open RallyHub in your mobile browser or install to your Home Screen.'
+          );
+        }
+        return false;
       },
-      refreshSmsServerStatus: async () => {
-        const next = await smsService.fetchSmsServerStatus(true);
-        setSmsServerStatus(next);
-        return next;
+      testPhoneNotification: async () => {
+        let perm = getNotificationPermission();
+        if (perm === 'default') {
+          await requestNotificationPermission();
+          perm = getNotificationPermission();
+          setPhoneNotificationPermission(perm);
+        }
+        if (perm !== 'granted') {
+          setBannerMessage(
+            perm === 'denied'
+              ? 'Notifications are blocked in browser settings.'
+              : 'Enable phone notifications first to send a test alert.'
+          );
+          return false;
+        }
+        if (joinedGroups.length > 0) {
+          void pushService.syncWebPushSubscription(joinedGroups.map((g) => g.groupId));
+        }
+        const shown = await postBrowserNotification(
+          `${activeGroup?.name ? `${activeGroup.name}: ` : ''}Test Announcement`,
+          'Group announcements will appear as regular notifications on your device.',
+          {
+            tag: 'rallyhub-test-notification',
+            groupId: activeGroup?.id ?? null,
+            url: '/?tab=alerts',
+          }
+        );
+        setBannerMessage(
+          shown
+            ? 'Test phone notification sent! Check your notification shade.'
+            : 'Could not display a system notification in this browser context.'
+        );
+        return shown;
       },
       requestGoogleSignIn: () => {
         onRequestGoogleSignIn?.();
@@ -2422,7 +2368,6 @@ export function useRallyWorkspace(
       personalAppearance,
       remindedTimes,
       selectedGroupId,
-      smsServerConfigured,
       switchGroup,
       uid,
     ]
@@ -2457,8 +2402,7 @@ export function useRallyWorkspace(
     groupImagesById,
     smsPreferences,
     smsPrefsLoaded,
-    smsServerConfigured,
-    smsServerStatus,
+    phoneNotificationPermission,
     bannerMessage,
     isBusy,
   };

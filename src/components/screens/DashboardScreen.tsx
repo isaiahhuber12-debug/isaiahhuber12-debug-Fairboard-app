@@ -740,7 +740,7 @@ export function DashboardScreen({
               className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 font-mono-code text-sm focus:border-[var(--rally-primary)] focus:outline-none"
             />
             <p className="text-[11px] text-[var(--rally-on-surface-variant)]">
-              Visible to your group&apos;s Creator and Admins for coordination and SMS updates.
+              Visible to your group&apos;s Creator and Admins for coordination and direct texting.
             </p>
           </div>
         </div>
@@ -757,12 +757,6 @@ export function DashboardScreen({
         members={members}
         memberContactsByUid={state.memberContactsByUid}
         initialRecipientPhones={smsTargetPhones}
-        serverConfigured={state.smsServerConfigured}
-        serverStatus={state.smsServerStatus}
-        onRefreshServerStatus={actions.refreshSmsServerStatus}
-        isGuest={state.isGuest}
-        isBusy={state.isBusy}
-        onSendCloudSms={actions.sendDirectSmsBroadcast}
         onBanner={actions.showBanner}
       />
 

@@ -30,6 +30,7 @@ import {
   RoleBadge,
 } from '../RallyComponents';
 import { GroupImageDialog, GroupImageEditor } from '../GroupImageEditor';
+import { PWAInstallButton } from '../PWAInstallPrompt';
 import { QrScannerModal } from '../QrScannerModal';
 
 interface CloudGroupHubScreenProps {
@@ -113,8 +114,9 @@ export function CloudGroupHubScreen({
               : ''}
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           <OfflineStatusBadge />
+          <PWAInstallButton />
           <button
             type="button"
             onClick={() => setShowAppearanceModal(true)}

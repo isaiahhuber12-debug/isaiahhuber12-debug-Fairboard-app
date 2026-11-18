@@ -27,6 +27,7 @@ import { readInviteCodeFromWindowLocation } from '../../lib/qrInvite';
 import { E164_PHONE_REGEX, normalizePhoneInput } from '../../services/smsService';
 import { PersonalAppearanceModal } from '../BackgroundCustomizerCard';
 import { ModalDialog, OfflineStatusBadge } from '../RallyComponents';
+import { PWAInstallButton } from '../PWAInstallPrompt';
 import { QrScannerModal } from '../QrScannerModal';
 
 interface AuthAndJoinScreenProps {
@@ -217,7 +218,8 @@ export function AuthAndJoinScreen({
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <PWAInstallButton variant="hero" onLightHeader={bannerBg.isLightBg} />
               {onUpdateAppearance && (
                 <button
                   type="button"

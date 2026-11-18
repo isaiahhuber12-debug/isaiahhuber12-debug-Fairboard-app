@@ -7,7 +7,6 @@ import {
   Pencil,
   Plus,
   Send,
-  Smartphone,
   Trash2,
 } from 'lucide-react';
 import type { RallyWorkspaceActions, RallyWorkspaceState } from '../../hooks/useRallyWorkspace';
@@ -41,7 +40,6 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
 
   const canManageChannels = !state.isGuest && ROLE_META[state.currentRole].canManageEventsAndTasks;
   const isAdminOrCreator = !state.isGuest && ROLE_META[state.currentRole].canAccessAdminPanel;
-  const smsMessagesActive = state.smsPreferences.enabled && state.smsPreferences.forMessages;
 
   return (
     <div className="mx-auto w-full max-w-[860px] px-4 py-5 sm:px-6">
@@ -53,7 +51,6 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
           canManageChannel={canManageChannels}
           canDeleteChannel={isAdminOrCreator}
           canDeleteMessages={isAdminOrCreator}
-          smsMessagesActive={smsMessagesActive}
           onBack={() => actions.selectChannel(null)}
           onEditChannel={() => setEditingChannel(activeChannel)}
           onDeleteChannel={() => setDeletingChannel(activeChannel)}
@@ -79,15 +76,6 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              {smsMessagesActive && (
-                <span
-                  data-testid="chats_sms_active_badge"
-                  className="inline-flex items-center gap-1 rounded-xl bg-[var(--rally-tertiary-container)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--rally-on-tertiary-container)]"
-                >
-                  <Smartphone className="h-3.5 w-3.5" />
-                  <span>SMS Push On</span>
-                </span>
-              )}
               {canManageChannels && (
                 <button
                   type="button"
@@ -258,7 +246,6 @@ function ChatThreadView({
   canManageChannel,
   canDeleteChannel,
   canDeleteMessages,
-  smsMessagesActive,
   onBack,
   onEditChannel,
   onDeleteChannel,
@@ -272,7 +259,6 @@ function ChatThreadView({
   canManageChannel: boolean;
   canDeleteChannel: boolean;
   canDeleteMessages: boolean;
-  smsMessagesActive: boolean;
   onBack: () => void;
   onEditChannel: () => void;
   onDeleteChannel: () => void;
@@ -314,12 +300,6 @@ function ChatThreadView({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="truncate font-display text-base font-bold">#{channel.name}</span>
-              {smsMessagesActive && (
-                <span className="hidden items-center gap-1 rounded-md bg-[var(--rally-tertiary-container)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--rally-on-tertiary-container)] sm:inline-flex">
-                  <Smartphone className="h-3 w-3" />
-                  SMS
-                </span>
-              )}
             </div>
             <div className="truncate text-xs text-[var(--rally-on-surface-variant)]">
               {CHANNEL_ACCESS_LABELS[parseChannelAccessLevel(channel.accessLevel)]} •{' '}

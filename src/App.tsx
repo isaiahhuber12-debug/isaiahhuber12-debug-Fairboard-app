@@ -60,6 +60,7 @@ import {
   OfflineStatusBadge,
   RoleBadge,
 } from './components/RallyComponents';
+import { HomeScreenPushBanner, PWAInstallButton } from './components/PWAInstallPrompt';
 import { AuthAndJoinScreen } from './components/screens/AuthAndJoinScreen';
 import { CloudGroupHubScreen } from './components/screens/CloudGroupHubScreen';
 import { DashboardScreen } from './components/screens/DashboardScreen';
@@ -432,47 +433,53 @@ export function App() {
 
   if (!identity) {
     return (
-      <AuthAndJoinScreen
-        onJoinWithCodeDirect={handleJoinWithCodeDirect}
-        onJoinWithCodeWithGoogle={handleJoinWithCodeWithGoogle}
-        onStandardGoogleSignIn={handleStandardGoogleSignIn}
-        onRedirectGoogleSignIn={handleRedirectGoogleSignIn}
-        showApkHelp={showApkAuthHelp}
-        authError={authError}
-        onClearError={() => setAuthError(null)}
-        appearance={deviceAppearance}
-        isDarkMode={unauthEffectiveDark}
-        onUpdateAppearance={(patch) => {
-          const next = sanitizePersonalAppearance({ ...deviceAppearance, ...patch });
-          setDeviceAppearance(writeStoredPersonalAppearance(null, next));
-        }}
-        onResetAppearance={() => {
-          setDeviceAppearance(writeStoredPersonalAppearance(null, DEFAULT_PERSONAL_APPEARANCE));
-        }}
-      />
+      <>
+        <AuthAndJoinScreen
+          onJoinWithCodeDirect={handleJoinWithCodeDirect}
+          onJoinWithCodeWithGoogle={handleJoinWithCodeWithGoogle}
+          onStandardGoogleSignIn={handleStandardGoogleSignIn}
+          onRedirectGoogleSignIn={handleRedirectGoogleSignIn}
+          showApkHelp={showApkAuthHelp}
+          authError={authError}
+          onClearError={() => setAuthError(null)}
+          appearance={deviceAppearance}
+          isDarkMode={unauthEffectiveDark}
+          onUpdateAppearance={(patch) => {
+            const next = sanitizePersonalAppearance({ ...deviceAppearance, ...patch });
+            setDeviceAppearance(writeStoredPersonalAppearance(null, next));
+          }}
+          onResetAppearance={() => {
+            setDeviceAppearance(writeStoredPersonalAppearance(null, DEFAULT_PERSONAL_APPEARANCE));
+          }}
+        />
+        <HomeScreenPushBanner />
+      </>
     );
   }
 
   return (
-    <CloudWorkspaceHost
-      key={identity.uid}
-      identity={identity}
-      systemDark={systemDark}
-      pendingJoin={pendingJoin}
-      pendingGooglePhone={pendingGooglePhone}
-      onPendingJoinConsumed={() => {
-        writeStoredPendingJoin(null);
-        setPendingJoin(null);
-      }}
-      onPendingGooglePhoneConsumed={() => {
-        writeStoredPendingGooglePhone(null);
-        setPendingGooglePhone(null);
-      }}
-      onRequestGoogleSignIn={(carryPhone?: string) => {
-        void handleStandardGoogleSignIn(carryPhone);
-      }}
-      onSignOut={() => void handleSignOut()}
-    />
+    <>
+      <CloudWorkspaceHost
+        key={identity.uid}
+        identity={identity}
+        systemDark={systemDark}
+        pendingJoin={pendingJoin}
+        pendingGooglePhone={pendingGooglePhone}
+        onPendingJoinConsumed={() => {
+          writeStoredPendingJoin(null);
+          setPendingJoin(null);
+        }}
+        onPendingGooglePhoneConsumed={() => {
+          writeStoredPendingGooglePhone(null);
+          setPendingGooglePhone(null);
+        }}
+        onRequestGoogleSignIn={(carryPhone?: string) => {
+          void handleStandardGoogleSignIn(carryPhone);
+        }}
+        onSignOut={() => void handleSignOut()}
+      />
+      <HomeScreenPushBanner />
+    </>
   );
 }
 
@@ -635,6 +642,7 @@ function CloudWorkspaceHost({
 
               <div className="flex shrink-0 items-center gap-1.5">
                 <OfflineStatusBadge />
+                <PWAInstallButton />
                 {state.isGuest && (
                   <button
                     type="button"

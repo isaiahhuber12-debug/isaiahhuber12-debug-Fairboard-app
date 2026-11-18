@@ -8,11 +8,9 @@ import {
   Copy,
   Hourglass,
   ListChecks,
-  Loader2,
   Megaphone,
   MessageSquareShare,
   Pencil,
-  RefreshCw,
   Send,
   Smartphone,
   Trash2,
@@ -22,14 +20,12 @@ import { formatDateTime } from '../../lib/dateFormat';
 import {
   buildDeviceSmsUri,
   E164_PHONE_REGEX,
-  formatPhoneDisplay,
   normalizePhoneInput,
-  type SmsServerStatus,
 } from '../../services/smsService';
 import {
-  getNotificationPermission,
+  isIosDevice,
   isReminderAt30mSet,
-  requestNotificationPermission,
+  isStandalonePwa,
 } from '../../lib/notifications';
 import {
   ApprovalStatus,
@@ -51,7 +47,6 @@ interface NotificationsScreenProps {
 }
 
 export function NotificationsScreen({ state, actions }: NotificationsScreenProps) {
-  const [permission, setPermission] = useState(() => getNotificationPermission());
   const [filterType, setFilterType] = useState<NotificationType | null>(null);
   const [showComposerDialog, setShowComposerDialog] = useState(false);
   const [showSmsComposer, setShowSmsComposer] = useState(false);
@@ -60,6 +55,7 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
   );
   const [editingNotification, setEditingNotification] = useState<HubNotification | null>(null);
   const [deletingNotification, setDeletingNotification] = useState<HubNotification | null>(null);
+  const [isSendingTestPush, setIsSendingTestPush] = useState(false);
 
   const notifications = useMemo(
     () => (state.notificationsState.status === 'success' ? state.notificationsState.data : []),
@@ -109,9 +105,17 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
     [allApproved, filterType]
   );
 
-  const handleRequestPermission = async () => {
-    await requestNotificationPermission();
-    setPermission(getNotificationPermission());
+  const permission = state.phoneNotificationPermission;
+  const showIosInstallHint = isIosDevice() && !isStandalonePwa();
+
+  const handleTestPhoneNotification = async () => {
+    if (isSendingTestPush) return;
+    setIsSendingTestPush(true);
+    try {
+      await actions.testPhoneNotification();
+    } finally {
+      setIsSendingTestPush(false);
+    }
   };
 
   return (
@@ -123,8 +127,8 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
           </h1>
           <p className="text-xs text-[var(--rally-canvas-text-muted,var(--rally-on-surface-variant))]">
             {isAdminOrCreator
-              ? 'Broadcast announcements, approve member announcements, and manage group & SMS alerts.'
-              : 'View group alerts, configure SMS push alerts, or submit an announcement (Admin approval required).'}
+              ? 'Broadcast announcements as regular phone notifications, approve submissions, and manage alerts.'
+              : 'Receive group announcements as regular phone notifications or submit an announcement (Admin approval required).'}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -135,7 +139,7 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
             className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-primary)]/45 bg-[var(--rally-surface)] px-3.5 py-2.5 text-sm font-semibold text-[var(--rally-primary)] shadow-xs transition hover:bg-[var(--rally-primary-container)]/50"
           >
             <MessageSquareShare className="h-4 w-4" />
-            <span>Send SMS</span>
+            <span>Text Members</span>
           </button>
           <button
             type="button"
@@ -149,44 +153,100 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
         </div>
       </div>
 
-      {/* SMS Text Push Notification Settings & Outbound Sender */}
-      <SmsNotificationsCard
-        key={`${state.smsPreferences.phone}_${state.smsPreferences.enabled}_${state.smsPreferences.forMessages}_${state.smsPreferences.forEvents}`}
-        groupName={state.activeGroup?.name ?? null}
-        preferences={state.smsPreferences}
-        serverConfigured={state.smsServerConfigured}
-        serverStatus={state.smsServerStatus}
-        isBusy={state.isBusy}
-        onSave={(prefs) => actions.saveSmsPreferences(prefs)}
-        onSendTest={(phone) => actions.sendTestSms(phone)}
-        onRefreshServerStatus={actions.refreshSmsServerStatus}
-        onOpenSmsComposer={() => setShowSmsComposer(true)}
-      />
-
-      {/* Browser Push Notification Prompt */}
-      {permission === 'default' && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[var(--rally-primary-container)] p-4 text-[var(--rally-on-primary-container)]">
+      {/* Regular Phone / OS Push Notification Card */}
+      <section
+        data-testid="phone_notifications_card"
+        className="space-y-3 rounded-3xl border border-[var(--rally-outline)]/65 bg-[var(--rally-surface)] p-5"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-start gap-2.5">
-            <Bell className="mt-0.5 h-5 w-5 shrink-0" />
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--rally-primary-container)] text-[var(--rally-on-primary-container)]">
+              <Bell className="h-4 w-4" />
+            </div>
             <div>
-              <div className="font-display text-sm font-bold">
-                Enable Push & Deadline Alerts
-              </div>
-              <p className="text-xs opacity-90">
-                Allow browser notifications so announcements and task reminders appear immediately.
+              <h2 className="font-display text-base font-bold sm:text-lg">
+                Phone Announcements &amp; Alerts
+              </h2>
+              <p className="text-xs text-[var(--rally-on-surface-variant)]">
+                Push new group announcements and reminders directly to your phone&apos;s regular
+                notification shade.
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleRequestPermission()}
-            data-testid="enable_notifications_button"
-            className="rounded-xl bg-[var(--rally-primary)] px-4 py-2 text-xs font-semibold text-white hover:brightness-110"
+
+          <span
+            data-testid="phone_notifications_status_badge"
+            className={`rounded-lg px-2.5 py-1 text-[11px] font-bold ${
+              permission === 'granted'
+                ? 'bg-[var(--rally-tertiary-container)] text-[var(--rally-on-tertiary-container)]'
+                : permission === 'denied'
+                  ? 'bg-[var(--rally-error-container)]/60 text-[var(--rally-error)]'
+                  : 'bg-[var(--rally-surface-variant)] text-[var(--rally-on-surface-variant)]'
+            }`}
           >
-            Enable
-          </button>
+            {permission === 'granted'
+              ? 'Phone Alerts On'
+              : permission === 'denied'
+                ? 'Blocked in Settings'
+                : permission === 'default'
+                  ? 'Not Enabled'
+                  : 'Unavailable'}
+          </span>
         </div>
-      )}
+
+        {showIosInstallHint && (
+          <div className="rounded-2xl border border-[var(--rally-primary)]/25 bg-[var(--rally-primary-container)]/40 px-3.5 py-2.5 text-xs text-[var(--rally-on-primary-container)]">
+            <strong className="font-semibold">iPhone / iPad Tip:</strong> Tap{' '}
+            <strong className="font-semibold">Share &rarr; Add to Home Screen</strong>, then open
+            RallyHub from your Home Screen to receive regular lock-screen notifications.
+          </div>
+        )}
+
+        {permission === 'denied' && (
+          <div className="flex items-start gap-2 rounded-2xl border border-[var(--rally-amber)]/55 bg-[var(--rally-amber-container)]/40 px-3.5 py-2.5 text-xs text-[var(--rally-on-surface)]">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--rally-amber)]" />
+            <span>
+              Notifications are currently blocked for this site. Open your browser&apos;s site
+              permissions and set Notifications to <strong>Allow</strong>.
+            </span>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {permission === 'default' && (
+            <button
+              type="button"
+              onClick={() => void actions.enablePhoneNotifications()}
+              data-testid="enable_notifications_button"
+              className="rounded-xl bg-[var(--rally-primary)] px-4 py-2 text-xs font-semibold text-white transition hover:brightness-110"
+            >
+              Enable Phone Notifications
+            </button>
+          )}
+          {permission === 'granted' && (
+            <button
+              type="button"
+              disabled={isSendingTestPush}
+              onClick={() => void handleTestPhoneNotification()}
+              data-testid="test_phone_notification_button"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-primary)]/45 bg-[var(--rally-primary-container)]/60 px-4 py-2 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95 disabled:opacity-50"
+            >
+              <BellRing className="h-3.5 w-3.5" />
+              <span>{isSendingTestPush ? 'Sending...' : 'Send Test Phone Notification'}</span>
+            </button>
+          )}
+        </div>
+      </section>
+
+      {/* Cell Phone & Device SMS Composer Card */}
+      <SmsNotificationsCard
+        key={state.smsPreferences.phone}
+        groupName={state.activeGroup?.name ?? null}
+        preferences={state.smsPreferences}
+        isBusy={state.isBusy}
+        onSave={(prefs) => actions.saveSmsPreferences(prefs)}
+        onOpenSmsComposer={() => setShowSmsComposer(true)}
+      />
 
       {/* Active Event Reminders */}
       {remindedEvents.length > 0 && (
@@ -413,19 +473,13 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
         </p>
       </ModalDialog>
 
-      {/* Outbound SMS Composer Modal */}
+      {/* Outbound Device SMS Composer Modal */}
       <GroupSmsComposerModal
         open={showSmsComposer}
         onClose={() => setShowSmsComposer(false)}
         groupName={state.activeGroup?.name ?? null}
         members={members}
         memberContactsByUid={state.memberContactsByUid}
-        serverConfigured={state.smsServerConfigured}
-        serverStatus={state.smsServerStatus}
-        onRefreshServerStatus={actions.refreshSmsServerStatus}
-        isGuest={state.isGuest}
-        isBusy={state.isBusy}
-        onSendCloudSms={actions.sendDirectSmsBroadcast}
         onBanner={actions.showBanner}
       />
     </div>
@@ -573,82 +627,29 @@ function NotificationItemCard({
 function SmsNotificationsCard({
   groupName,
   preferences,
-  serverConfigured,
-  serverStatus,
   isBusy,
   onSave,
-  onSendTest,
-  onRefreshServerStatus,
   onOpenSmsComposer,
 }: {
   groupName: string | null;
   preferences: SmsPreferences;
-  serverConfigured: boolean;
-  serverStatus: SmsServerStatus;
   isBusy: boolean;
   onSave: (prefs: SmsPreferences) => Promise<boolean>;
-  onSendTest: (phone: string) => Promise<{ ok: boolean; error?: string }>;
-  onRefreshServerStatus: () => Promise<SmsServerStatus>;
   onOpenSmsComposer: () => void;
 }) {
   const [phoneInput, setPhoneInput] = useState(preferences.phone);
-  const [enabled, setEnabled] = useState(preferences.enabled);
-  const [forMessages, setForMessages] = useState(preferences.forMessages);
-  const [forEvents, setForEvents] = useState(preferences.forEvents);
-  const [isTestingCloud, setIsTestingCloud] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [testFeedback, setTestFeedback] = useState<{
-    ok: boolean;
-    message: string;
-  } | null>(null);
 
   const normalizedPhone = phoneInput.trim() ? normalizePhoneInput(phoneInput) : '';
   const isPhoneValid = !normalizedPhone || E164_PHONE_REGEX.test(normalizedPhone);
-  const hasCloudCredentials = Boolean(serverConfigured || serverStatus.secretsPresent);
-  const canSave = !isBusy && (!enabled || Boolean(normalizedPhone)) && isPhoneValid;
-  const canCloudTest =
-    !isBusy && !isTestingCloud && hasCloudCredentials && Boolean(normalizedPhone) && isPhoneValid;
+  const canSave = !isBusy && isPhoneValid;
 
   const deviceTestUri =
     normalizedPhone && isPhoneValid
       ? buildDeviceSmsUri(
           [normalizedPhone],
-          `[${groupName || 'RallyHub'}] Test SMS: Your phone number is ready for RallyHub updates!`
+          `[${groupName || 'RallyHub'}] Test message from RallyHub.`
         )
       : '';
-
-  const handleTestCloud = async () => {
-    if (!canCloudTest) return;
-    setIsTestingCloud(true);
-    setTestFeedback(null);
-    try {
-      const res = await onSendTest(normalizedPhone);
-      if (res.ok) {
-        setTestFeedback({
-          ok: true,
-          message: `Cloud test SMS sent to ${formatPhoneDisplay(normalizedPhone)}! Check your phone.`,
-        });
-      } else {
-        setTestFeedback({
-          ok: false,
-          message: res.error || 'Could not send Cloud test SMS.',
-        });
-      }
-    } finally {
-      setIsTestingCloud(false);
-    }
-  };
-
-  const handleRefresh = async () => {
-    if (isRefreshing) return;
-    setIsRefreshing(true);
-    setTestFeedback(null);
-    try {
-      await onRefreshServerStatus();
-    } finally {
-      setIsRefreshing(false);
-    }
-  };
 
   return (
     <section
@@ -662,182 +663,45 @@ function SmsNotificationsCard({
           </div>
           <div>
             <h2 className="font-display text-base font-bold sm:text-lg">
-              Cell Phone &amp; SMS Messaging
+              Cell Phone &amp; Direct Texting
             </h2>
             <p className="text-xs text-[var(--rally-on-surface-variant)]">
-              Save your cell phone number for group leadership and send or receive SMS text updates.
+              Save your cell phone number for group leadership or compose a text via your
+              phone&apos;s Messages app.
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={onOpenSmsComposer}
-            data-testid="sms_card_open_composer_button"
-            className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-primary-container)] px-3 py-1.5 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95"
-          >
-            <MessageSquareShare className="h-3.5 w-3.5" />
-            <span>Send SMS to Numbers</span>
-          </button>
-          <span
-            data-testid="sms_cloud_health_badge"
-            className={`rounded-lg px-2.5 py-1 text-[11px] font-bold ${
-              serverStatus.ready
-                ? 'bg-[var(--rally-tertiary-container)] text-[var(--rally-on-tertiary-container)]'
-                : hasCloudCredentials
-                  ? 'bg-[var(--rally-amber-container)] text-amber-900 dark:text-amber-100'
-                  : 'bg-[var(--rally-surface-variant)] text-[var(--rally-on-surface-variant)]'
-            }`}
-          >
-            {serverStatus.ready
-              ? 'Cloud SMS Ready'
-              : hasCloudCredentials
-                ? 'Cloud SMS Check Needed'
-                : 'Device SMS Mode'}
-          </span>
-          <span
-            data-testid="sms_status_badge"
-            className={`rounded-lg px-2.5 py-1 text-[11px] font-bold ${
-              preferences.enabled
-                ? 'bg-[var(--rally-tertiary-container)] text-[var(--rally-on-tertiary-container)]'
-                : 'bg-[var(--rally-surface-variant)] text-[var(--rally-on-surface-variant)]'
-            }`}
-          >
-            {preferences.enabled ? 'SMS Enabled' : 'SMS Off'}
-          </span>
-        </div>
+        <button
+          type="button"
+          onClick={onOpenSmsComposer}
+          data-testid="sms_card_open_composer_button"
+          className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-primary-container)] px-3 py-1.5 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95"
+        >
+          <MessageSquareShare className="h-3.5 w-3.5" />
+          <span>Send SMS to Numbers</span>
+        </button>
       </div>
 
-      {serverStatus.configIssue ? (
-        <div
-          data-testid="sms_card_config_issue_banner"
-          className="rounded-2xl border border-[var(--rally-amber)]/55 bg-[var(--rally-amber-container)]/40 px-3.5 py-3 text-xs leading-relaxed text-[var(--rally-on-surface)]"
-        >
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--rally-amber)]" />
-              <div className="space-y-1">
-                <div className="font-semibold">Cloud SMS Configuration Issue Detected</div>
-                <p>{serverStatus.configIssue}</p>
-                <p className="text-[11px] text-[var(--rally-on-surface-variant)]">
-                  While updating AI Studio <strong>Settings &gt; Secrets</strong>, you can still use{' '}
-                  <strong>Send SMS to Numbers</strong> &rarr; <strong>Open in SMS App</strong> to
-                  text members directly from your phone.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => void handleRefresh()}
-              disabled={isRefreshing}
-              data-testid="sms_card_recheck_button"
-              className="inline-flex items-center gap-1 rounded-lg border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-2.5 py-1.5 text-[11px] font-semibold hover:bg-[var(--rally-surface-variant)] disabled:opacity-50"
-            >
-              <RefreshCw className={`h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span>Re-check Cloud SMS</span>
-            </button>
-          </div>
-        </div>
-      ) : serverStatus.ready ? (
-        <div
-          data-testid="sms_card_cloud_ready_banner"
-          className="rounded-2xl border border-[var(--rally-tertiary)]/35 bg-[var(--rally-tertiary-container)]/35 px-3.5 py-2.5 text-xs text-[var(--rally-on-tertiary-container)]"
-        >
-          <strong className="font-semibold">
-            Cloud SMS Active
-            {serverStatus.senderDisplay ? ` (${serverStatus.senderDisplay})` : ''}:
-          </strong>{' '}
-          Automated carrier texts and broadcast SMS are connected.
-          {serverStatus.accountType?.toLowerCase() === 'trial' && (
-            <span className="ml-1 opacity-90">
-              (Twilio Trial account: recipient numbers must be verified in your Twilio Console.)
-            </span>
-          )}
-        </div>
-      ) : (
-        <div className="rounded-2xl border border-[var(--rally-primary)]/25 bg-[var(--rally-primary-container)]/40 px-3.5 py-2.5 text-xs text-[var(--rally-on-primary-container)]">
-          Tap <strong className="font-semibold">Send SMS to Numbers</strong> above to text one or
-          multiple phone numbers directly from your device&apos;s Messages app right now. Optional
-          automated cloud SMS push activates when server{' '}
-          <code className="font-mono-code">TWILIO_*</code> environment variables are configured.
-        </div>
-      )}
-
-      {testFeedback && (
-        <div
-          data-testid="sms_test_inline_feedback"
-          className={`flex items-start gap-2 rounded-2xl border px-3.5 py-2.5 text-xs leading-relaxed ${
-            testFeedback.ok
-              ? 'border-[var(--rally-tertiary)]/40 bg-[var(--rally-tertiary-container)]/45 text-[var(--rally-on-tertiary-container)]'
-              : 'border-[var(--rally-error)]/45 bg-[var(--rally-error-container)]/50 text-[var(--rally-on-surface)]'
-          }`}
-        >
-          {testFeedback.ok ? (
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[var(--rally-tertiary)]" />
-          ) : (
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--rally-error)]" />
-          )}
-          <span>{testFeedback.message}</span>
-        </div>
-      )}
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div>
-          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
-            Your Cell Phone Number
-          </label>
-          <input
-            type="tel"
-            value={phoneInput}
-            onChange={(e) => setPhoneInput(e.target.value.slice(0, 24))}
-            placeholder="(555) 123-4567"
-            data-testid="sms_phone_input"
-            className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface-variant)]/30 px-3.5 py-2 font-mono-code text-sm focus:border-[var(--rally-primary)] focus:outline-none"
-          />
-          <p className="mt-1 text-[11px] text-[var(--rally-on-surface-variant)]">
-            10-digit US numbers auto-format to +1; shared privately with group Creator &amp; Admins.
+      <div>
+        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
+          Your Cell Phone Number
+        </label>
+        <input
+          type="tel"
+          value={phoneInput}
+          onChange={(e) => setPhoneInput(e.target.value.slice(0, 24))}
+          placeholder="(555) 123-4567"
+          data-testid="sms_phone_input"
+          className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface-variant)]/30 px-3.5 py-2 font-mono-code text-sm focus:border-[var(--rally-primary)] focus:outline-none"
+        />
+        <p className="mt-1 text-[11px] text-[var(--rally-on-surface-variant)]">
+          10-digit US numbers auto-format to +1; shared privately with group Creator &amp; Admins.
+        </p>
+        {!isPhoneValid && (
+          <p className="mt-1 text-[11px] font-semibold text-[var(--rally-error)]">
+            Enter a valid E.164 phone number (e.g. +15551234567).
           </p>
-          {!isPhoneValid && (
-            <p className="mt-1 text-[11px] font-semibold text-[var(--rally-error)]">
-              Enter a valid E.164 phone number (e.g. +15551234567).
-            </p>
-          )}
-        </div>
-
-        <div className="space-y-2 rounded-2xl border border-[var(--rally-outline)]/50 bg-[var(--rally-surface-variant)]/25 p-3">
-          <label className="flex cursor-pointer items-center justify-between gap-2 text-sm font-semibold">
-            <span>Enable SMS text alerts</span>
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              data-testid="sms_enabled_toggle"
-              className="h-4 w-4 accent-[var(--rally-primary)]"
-            />
-          </label>
-
-          <label className="flex cursor-pointer items-center justify-between gap-2 text-xs text-[var(--rally-on-surface-variant)]">
-            <span>New chat messages</span>
-            <input
-              type="checkbox"
-              checked={forMessages}
-              onChange={(e) => setForMessages(e.target.checked)}
-              data-testid="sms_messages_toggle"
-              className="h-4 w-4 accent-[var(--rally-primary)]"
-            />
-          </label>
-
-          <label className="flex cursor-pointer items-center justify-between gap-2 text-xs text-[var(--rally-on-surface-variant)]">
-            <span>Calendar events &amp; updates</span>
-            <input
-              type="checkbox"
-              checked={forEvents}
-              onChange={(e) => setForEvents(e.target.checked)}
-              data-testid="sms_events_toggle"
-              className="h-4 w-4 accent-[var(--rally-primary)]"
-            />
-          </label>
-        </div>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -848,20 +712,8 @@ function SmsNotificationsCard({
             className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] px-3.5 py-2 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)]"
           >
             <MessageSquareShare className="h-3.5 w-3.5" />
-            <span>Test via SMS App</span>
+            <span>Open in SMS App</span>
           </a>
-        )}
-        {hasCloudCredentials && (
-          <button
-            type="button"
-            disabled={!canCloudTest}
-            onClick={() => void handleTestCloud()}
-            data-testid="send_test_sms_button"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] px-3.5 py-2 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)] disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            {isTestingCloud && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            <span>Send Cloud Test SMS</span>
-          </button>
         )}
         <button
           type="button"
@@ -869,15 +721,15 @@ function SmsNotificationsCard({
           onClick={() =>
             void onSave({
               phone: normalizedPhone,
-              enabled,
-              forMessages,
-              forEvents,
+              enabled: false,
+              forMessages: false,
+              forEvents: false,
             })
           }
           data-testid="save_sms_settings_button"
           className="rounded-xl bg-[var(--rally-primary)] px-4 py-2 text-xs font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
         >
-          Save Phone &amp; SMS Settings
+          Save Phone Number
         </button>
       </div>
     </section>

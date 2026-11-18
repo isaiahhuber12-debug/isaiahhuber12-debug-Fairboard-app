@@ -5,7 +5,7 @@ import firebaseRulesPlugin from '@firebase/eslint-plugin-security-rules';
 
 export default [
   {
-    ignores: ['dist/**', 'node_modules/**', 'app/**', 'gradle/**', 'firestore.test.js'],
+    ignores: ['dist/**', 'dev-dist/**', 'node_modules/**', 'app/**', 'gradle/**', 'firestore.test.js'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

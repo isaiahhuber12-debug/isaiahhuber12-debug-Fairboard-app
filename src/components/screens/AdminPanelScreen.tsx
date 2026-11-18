@@ -760,12 +760,6 @@ export function AdminPanelScreen({
         members={members}
         memberContactsByUid={state.memberContactsByUid}
         initialRecipientPhones={smsTargetPhones}
-        serverConfigured={state.smsServerConfigured}
-        serverStatus={state.smsServerStatus}
-        onRefreshServerStatus={actions.refreshSmsServerStatus}
-        isGuest={state.isGuest}
-        isBusy={state.isBusy}
-        onSendCloudSms={actions.sendDirectSmsBroadcast}
         onBanner={actions.showBanner}
       />
 

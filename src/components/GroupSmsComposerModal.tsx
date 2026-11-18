@@ -1,14 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import {
-  AlertTriangle,
   Check,
-  CheckCircle2,
   Copy,
-  Loader2,
   MessageSquareShare,
   Phone,
-  RefreshCw,
-  Send,
   Smartphone,
   Users,
 } from 'lucide-react';
@@ -18,7 +13,6 @@ import {
   formatPhoneDisplay,
   normalizePhoneInput,
   parsePhoneListInput,
-  type SmsServerStatus,
 } from '../services/smsService';
 import {
   type GroupMember,
@@ -37,21 +31,6 @@ export interface GroupSmsComposerModalProps {
   memberContactsByUid: Record<string, MemberContactInfo>;
   initialRecipientPhones?: string[];
   initialMessage?: string;
-  serverConfigured: boolean;
-  serverStatus?: SmsServerStatus;
-  onRefreshServerStatus?: () => Promise<SmsServerStatus>;
-  isGuest: boolean;
-  isBusy: boolean;
-  onSendCloudSms: (
-    phones: string[],
-    message: string
-  ) => Promise<{
-    ok: boolean;
-    sentCount: number;
-    failedCount?: number;
-    configured: boolean;
-    error?: string;
-  }>;
   onBanner?: (message: string) => void;
 }
 
@@ -68,11 +47,6 @@ function GroupSmsComposerModalBody({
   memberContactsByUid,
   initialRecipientPhones,
   initialMessage = '',
-  serverConfigured,
-  serverStatus,
-  onRefreshServerStatus,
-  isBusy,
-  onSendCloudSms,
   onBanner,
 }: GroupSmsComposerModalProps) {
   const membersWithPhones = useMemo(() => {
@@ -126,12 +100,6 @@ function GroupSmsComposerModalBody({
   const [messageBody, setMessageBody] = useState<string>(initialMessage);
   const [copiedNumbers, setCopiedNumbers] = useState(false);
   const [copiedMessage, setCopiedMessage] = useState(false);
-  const [isSendingCloud, setIsSendingCloud] = useState(false);
-  const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
-  const [cloudFeedback, setCloudFeedback] = useState<{
-    kind: 'error' | 'partial';
-    message: string;
-  } | null>(null);
 
   const visibleMemberEntries = useMemo(() => {
     if (roleFilter === 'ALL') return membersWithPhones;
@@ -218,62 +186,14 @@ function GroupSmsComposerModalBody({
     }
   };
 
-  const handleRefreshStatus = async () => {
-    if (!onRefreshServerStatus || isRefreshingStatus) return;
-    setIsRefreshingStatus(true);
-    setCloudFeedback(null);
-    try {
-      await onRefreshServerStatus();
-    } finally {
-      setIsRefreshingStatus(false);
-    }
-  };
-
-  const handleCloudSend = async () => {
-    if (allRecipientPhones.length === 0 || !formattedSmsText || isSendingCloud || isBusy) return;
-    setIsSendingCloud(true);
-    setCloudFeedback(null);
-    try {
-      const res = await onSendCloudSms(allRecipientPhones, formattedSmsText);
-      if (res.ok && res.sentCount > 0 && (!res.failedCount || res.failedCount === 0)) {
-        onClose();
-        return;
-      }
-      if (res.sentCount > 0 && res.failedCount && res.failedCount > 0) {
-        setCloudFeedback({
-          kind: 'partial',
-          message: `Sent to ${res.sentCount} phone number(s), but ${res.failedCount} failed${res.error ? `: ${res.error}` : '.'}`,
-        });
-        return;
-      }
-      setCloudFeedback({
-        kind: 'error',
-        message:
-          res.error ||
-          'Cloud SMS could not be delivered. Check your Twilio settings in AI Studio Settings > Secrets, or tap "Open in SMS App" below.',
-      });
-    } finally {
-      setIsSendingCloud(false);
-    }
-  };
-
-  const hasCloudCredentials = Boolean(serverConfigured || serverStatus?.secretsPresent);
-  const cloudConfigIssue = serverStatus?.configIssue;
   const canLaunchDeviceSms = allRecipientPhones.length > 0;
-  const canSendCloud =
-    hasCloudCredentials &&
-    !isBusy &&
-    !isSendingCloud &&
-    allRecipientPhones.length > 0 &&
-    messageBody.trim().length >= 1;
-
   const smsSegments = Math.max(1, Math.ceil((formattedSmsText.length || 1) / 160));
 
   return (
     <ModalDialog
       open
       onClose={onClose}
-      title="Send SMS to Phone Numbers"
+      title="Text via Your SMS App"
       maxWidthClass="max-w-xl"
       footer={
         <div className="flex w-full flex-wrap items-center justify-between gap-2">
@@ -309,23 +229,6 @@ function GroupSmsComposerModalBody({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {hasCloudCredentials && (
-              <button
-                type="button"
-                disabled={!canSendCloud}
-                onClick={() => void handleCloudSend()}
-                data-testid="sms_composer_cloud_send_button"
-                className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-primary)] bg-[var(--rally-primary-container)]/55 px-3.5 py-2 text-xs font-semibold text-[var(--rally-on-primary-container)] transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-45"
-              >
-                {isSendingCloud ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Send className="h-3.5 w-3.5" />
-                )}
-                <span>Send Cloud SMS ({allRecipientPhones.length})</span>
-              </button>
-            )}
-
             {canLaunchDeviceSms && deviceSmsUri ? (
               <a
                 href={deviceSmsUri}
@@ -354,102 +257,17 @@ function GroupSmsComposerModalBody({
       }
     >
       <div data-testid="group_sms_composer_modal" className="space-y-4">
-        {/* Cloud SMS Live Status / Diagnostic Banner */}
-        {cloudFeedback ? (
-          <div
-            data-testid="sms_composer_cloud_error_banner"
-            className="rounded-2xl border border-[var(--rally-error)]/45 bg-[var(--rally-error-container)]/55 p-3 text-xs leading-relaxed text-[var(--rally-on-surface)]"
-          >
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--rally-error)]" />
-              <div className="min-w-0 flex-1 space-y-1">
-                <div className="font-semibold text-[var(--rally-error)]">
-                  {cloudFeedback.kind === 'partial'
-                    ? 'Partial Cloud SMS Delivery'
-                    : 'Cloud SMS Delivery Failed'}
-                </div>
-                <p>{cloudFeedback.message}</p>
-                <p className="text-[11px] text-[var(--rally-on-surface-variant)]">
-                  Tip: You can tap <strong>Open in SMS App</strong> below to send this message
-                  immediately from your device while updating server secrets.
-                </p>
-              </div>
+        <div className="rounded-2xl border border-[var(--rally-primary)]/25 bg-[var(--rally-primary-container)]/45 p-3 text-xs leading-relaxed text-[var(--rally-on-primary-container)]">
+          <div className="flex items-start gap-2">
+            <Smartphone className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <strong className="font-semibold">Device Texting:</strong> Select group members
+              below or enter any cell phone numbers, write your message, and tap{' '}
+              <strong className="font-semibold">Open in SMS App</strong> to send directly from your
+              phone or Messages app.
             </div>
           </div>
-        ) : cloudConfigIssue ? (
-          <div
-            data-testid="sms_composer_config_issue_banner"
-            className="rounded-2xl border border-[var(--rally-amber)]/55 bg-[var(--rally-amber-container)]/45 p-3 text-xs leading-relaxed text-[var(--rally-on-surface)]"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--rally-amber)]" />
-                <div className="space-y-1">
-                  <div className="font-semibold">Cloud SMS Credential Check Needed</div>
-                  <p>{cloudConfigIssue}</p>
-                  <p className="text-[11px] text-[var(--rally-on-surface-variant)]">
-                    Tap <strong>Open in SMS App</strong> below to text recipients directly from your
-                    phone right now.
-                  </p>
-                </div>
-              </div>
-              {onRefreshServerStatus && (
-                <button
-                  type="button"
-                  onClick={() => void handleRefreshStatus()}
-                  disabled={isRefreshingStatus}
-                  data-testid="sms_composer_recheck_button"
-                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-2.5 py-1 text-[11px] font-semibold hover:bg-[var(--rally-surface-variant)] disabled:opacity-50"
-                >
-                  <RefreshCw className={`h-3 w-3 ${isRefreshingStatus ? 'animate-spin' : ''}`} />
-                  <span>Re-check</span>
-                </button>
-              )}
-            </div>
-          </div>
-        ) : serverStatus?.ready ? (
-          <div
-            data-testid="sms_composer_cloud_ready_banner"
-            className="rounded-2xl border border-[var(--rally-tertiary)]/35 bg-[var(--rally-tertiary-container)]/45 p-3 text-xs leading-relaxed text-[var(--rally-on-tertiary-container)]"
-          >
-            <div className="flex items-start gap-2">
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-              <div>
-                <strong className="font-semibold">
-                  Cloud SMS Connected
-                  {serverStatus.senderDisplay ? ` (${serverStatus.senderDisplay})` : ''}:
-                </strong>{' '}
-                Tap <strong className="font-semibold">Send Cloud SMS</strong> to broadcast directly
-                from the server, or <strong className="font-semibold">Open in SMS App</strong> to
-                send from your phone.
-                {serverStatus.accountType?.toLowerCase() === 'trial' && (
-                  <span className="mt-1 block text-[11px] opacity-90">
-                    Note: Twilio Trial accounts can only send Cloud SMS to phone numbers verified in
-                    your Twilio Console.
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="rounded-2xl border border-[var(--rally-primary)]/25 bg-[var(--rally-primary-container)]/45 p-3 text-xs leading-relaxed text-[var(--rally-on-primary-container)]">
-            <div className="flex items-start gap-2">
-              <Smartphone className="mt-0.5 h-4 w-4 shrink-0" />
-              <div>
-                <strong className="font-semibold">Direct Carrier Texting Ready:</strong> Select group
-                members below or enter any cell phone numbers, write your message, and tap{' '}
-                <strong className="font-semibold">Open in SMS App</strong> to send immediately from
-                your phone or connected Messages app.
-                {!hasCloudCredentials && (
-                  <span className="block pt-1 opacity-90">
-                    (Optional automated Cloud SMS broadcast also unlocks automatically if server{' '}
-                    <code className="font-mono-code">TWILIO_*</code> credentials are configured.)
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
+        </div>
 
         {/* Member Phone Directory Picker */}
         {membersWithPhones.length > 0 && (
