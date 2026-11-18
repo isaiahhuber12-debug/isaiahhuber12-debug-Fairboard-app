@@ -20,6 +20,7 @@ import {
 } from '../lib/csvExport';
 import { formatDateTime } from '../lib/dateFormat';
 import { getFriendlyErrorMessage } from '../lib/firestoreError';
+import { upsertGuestJoinedGroup } from '../lib/guestSession';
 import {
   cancelBrowserReminder,
   cancelBrowserReminderAt,
@@ -779,7 +780,6 @@ export function useRallyWorkspace(
   }, [activeGroup, uid, membersState]);
 
   const currentRole: MemberRole = useMemo(() => {
-    if (isGuest) return MemberRole.PARTICIPANT;
     if (activeGroup && activeGroup.ownerId === uid) return MemberRole.CREATOR;
     if (normalizedMembersState.status === 'success') {
       const found = normalizedMembersState.data.find((m) => m.uid === uid);
@@ -787,6 +787,21 @@ export function useRallyWorkspace(
     }
     const ref = joinedGroups.find((g) => g.groupId === activeGroup?.id);
     return ref ? parseMemberRole(ref.role) : MemberRole.PARTICIPANT;
+  }, [activeGroup, uid, normalizedMembersState, joinedGroups]);
+
+  // Keep guest session joinedGroups role synced when an Admin/Creator updates a no-email member's role
+  useEffect(() => {
+    if (!isGuest || !activeGroup || normalizedMembersState.status !== 'success') return;
+    const found = normalizedMembersState.data.find((m) => m.uid === uid);
+    if (!found) return;
+    const liveRole = parseMemberRole(found.role);
+    const existingRef = joinedGroups.find((g) => g.groupId === activeGroup.id);
+    if (!existingRef || parseMemberRole(existingRef.role) === liveRole) return;
+    upsertGuestJoinedGroup({
+      ...existingRef,
+      role: liveRole,
+      updatedAtMs: Date.now(),
+    });
   }, [isGuest, activeGroup, uid, normalizedMembersState, joinedGroups]);
 
   const currentUserName = useMemo(() => {
@@ -1807,7 +1822,8 @@ export function useRallyWorkspace(
       }) => {
         if (!activeGroup) return false;
         const needsApproval =
-          type === NotificationType.ANNOUNCEMENT && !ROLE_META[currentRole].canAccessAdminPanel;
+          isGuest ||
+          (type === NotificationType.ANNOUNCEMENT && !ROLE_META[currentRole].canAccessAdminPanel);
         const resolvedScope = needsApproval ? 'ALL' : targetScope;
         const resolvedTargetRole = needsApproval ? 'ADMIN' : targetRole;
         const resolvedStatus = needsApproval ? ApprovalStatus.PENDING : ApprovalStatus.APPROVED;
@@ -1879,7 +1895,8 @@ export function useRallyWorkspace(
       }) => {
         if (!activeGroup) return;
         const isPendingSubmission =
-          type === NotificationType.ANNOUNCEMENT && !ROLE_META[currentRole].canAccessAdminPanel;
+          isGuest ||
+          (type === NotificationType.ANNOUNCEMENT && !ROLE_META[currentRole].canAccessAdminPanel);
         setIsBusy(true);
         try {
           await repo.updateNotification(
@@ -2394,6 +2411,7 @@ export function useRallyWorkspace(
       currentUserName,
       eventsState,
       fireInAppReminder,
+      isGuest,
       joinGroupByCode,
       joinedGroups,
       logActivity,

@@ -111,11 +111,11 @@ export function DashboardScreen({
   }, [notifications]);
 
   const pendingCount = useMemo(() => {
-    if (!ROLE_META[state.currentRole].canAccessAdminPanel) return 0;
+    if (state.isGuest || !ROLE_META[state.currentRole].canAccessAdminPanel) return 0;
     return notifications.filter(
       (n) => parseApprovalStatus(n.approvalStatus) === ApprovalStatus.PENDING
     ).length;
-  }, [notifications, state.currentRole]);
+  }, [notifications, state.currentRole, state.isGuest]);
 
   const allOpenTasks = useMemo(() => {
     const flat = Object.values(state.allTasksByEvent).flat();
@@ -143,8 +143,10 @@ export function DashboardScreen({
     [events, showAllEvents]
   );
 
-  const canManageEvents = ROLE_META[state.currentRole].canManageEventsAndTasks;
-  const canAdmin = ROLE_META[state.currentRole].canAccessAdminPanel;
+  const canManageEvents = !state.isGuest && ROLE_META[state.currentRole].canManageEventsAndTasks;
+  const canAdmin = !state.isGuest && ROLE_META[state.currentRole].canAccessAdminPanel;
+  const hasElevatedGuestRole =
+    state.isGuest && ROLE_META[state.currentRole].canManageEventsAndTasks;
   const groupBg = useMemo(
     () => getPersonalBannerPresentation(state.personalAppearance),
     [state.personalAppearance]
@@ -273,6 +275,31 @@ export function DashboardScreen({
           </div>
         )}
       </div>
+
+      {hasElevatedGuestRole && (
+        <div
+          data-testid="dashboard_guest_elevated_role_banner"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--rally-primary)]/35 bg-[var(--rally-surface)] p-4 shadow-2xs"
+        >
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="font-display text-sm font-bold text-[var(--rally-on-surface)]">
+              {ROLE_META[state.currentRole].label} Role Assigned
+            </div>
+            <p className="text-xs text-[var(--rally-on-surface-variant)]">
+              Sign in with Google to unlock your {ROLE_META[state.currentRole].label.toLowerCase()}{' '}
+              management tools, event editing, and member directory access.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => actions.requestGoogleSignIn()}
+            data-testid="dashboard_guest_google_signin_button"
+            className="shrink-0 rounded-xl bg-[var(--rally-primary)] px-3.5 py-2 text-xs font-semibold text-white transition hover:brightness-110"
+          >
+            Sign In with Google
+          </button>
+        </div>
+      )}
 
       {/* Gemini AI Coordinator Callout Card */}
       <div

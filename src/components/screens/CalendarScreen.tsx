@@ -67,12 +67,12 @@ export function CalendarScreen({ state, actions }: CalendarScreenProps) {
   const [deletingTask, setDeletingTask] = useState<EventTask | null>(null);
   const [reminderTarget, setReminderTarget] = useState<CalendarReminderTarget | null>(null);
 
-  const canManage = ROLE_META[state.currentRole].canManageEventsAndTasks;
-  const isAdminOrCreator = ROLE_META[state.currentRole].canAccessAdminPanel;
+  const canManage = !state.isGuest && ROLE_META[state.currentRole].canManageEventsAndTasks;
+  const isAdminOrCreator = !state.isGuest && ROLE_META[state.currentRole].canAccessAdminPanel;
   const canDeleteEvent = (evt: RallyEvent) =>
-    isAdminOrCreator || evt.createdBy === state.currentUserId;
+    isAdminOrCreator || (!state.isGuest && evt.createdBy === state.currentUserId);
   const canDeleteTask = (task: EventTask) =>
-    isAdminOrCreator || task.createdBy === state.currentUserId;
+    isAdminOrCreator || (!state.isGuest && task.createdBy === state.currentUserId);
 
   return (
     <div className="mx-auto w-full max-w-[860px] px-4 py-5 sm:px-6">

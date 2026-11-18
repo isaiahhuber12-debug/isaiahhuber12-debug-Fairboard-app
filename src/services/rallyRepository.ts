@@ -1382,16 +1382,14 @@ export async function joinGroupByCode(
 
   const guestSession = isGuest ? getStoredGuestSession() : null;
   const resolvedNameRaw =
-    displayNameOverride?.trim() ||
-    guestSession?.displayName?.trim() ||
-    auth.currentUser?.displayName?.trim() ||
-    auth.currentUser?.email?.split('@')[0]?.trim() ||
-    '';
+    displayNameOverride !== undefined
+      ? (displayNameOverride ?? '').trim()
+      : guestSession?.displayName?.trim() || auth.currentUser?.displayName?.trim() || '';
 
-  if (isGuest && resolvedNameRaw.length < 2) {
-    throw new Error('Please enter your name (at least 2 characters) to join with a group code.');
+  if (resolvedNameRaw.length < 2) {
+    throw new Error('Please enter your name (at least 2 characters) to join a group.');
   }
-  const displayName = (resolvedNameRaw || 'Participant').slice(0, 60);
+  const displayName = resolvedNameRaw.slice(0, 60);
 
   const rawPhoneCandidate =
     phoneNumberOverride?.trim() || guestSession?.phoneNumber?.trim() || '';

@@ -57,6 +57,7 @@ export function CloudGroupHubScreen({
   const [showAppearanceModal, setShowAppearanceModal] = useState(false);
   const groupNameInputRef = useRef<HTMLInputElement | null>(null);
 
+  const isJoinNameValid = joinDisplayName.trim().length >= 2;
   const effectiveJoinPhone = joinPhone.trim() || state.smsPreferences.phone || '';
   const normalizedJoinPhone = effectiveJoinPhone ? normalizePhoneInput(effectiveJoinPhone) : '';
   const isJoinPhoneValid = E164_PHONE_REGEX.test(normalizedJoinPhone);
@@ -186,13 +187,19 @@ export function CloudGroupHubScreen({
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-[var(--rally-on-surface-variant)]">
-                Your Full Name
+                Your Full Name <span className="text-[var(--rally-secondary)]">*</span>
               </label>
               <input
                 type="text"
+                required
+                aria-required="true"
                 value={joinDisplayName}
                 onChange={(e) => setJoinDisplayName(e.target.value.slice(0, 40))}
-                placeholder={state.currentUserName}
+                placeholder={
+                  state.currentUserName && state.currentUserName !== 'Participant'
+                    ? `e.g. ${state.currentUserName}`
+                    : 'e.g. Jordan Taylor'
+                }
                 data-testid="cloud_join_name_input"
                 className="w-full rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3.5 py-2.5 text-sm focus:border-[var(--rally-primary)] focus:outline-none"
               />
@@ -216,12 +223,21 @@ export function CloudGroupHubScreen({
             </div>
           </div>
 
+          {!isJoinNameValid && (
+            <p className="text-[11px] font-medium text-[var(--rally-on-surface-variant)]">
+              Enter your full name (at least 2 characters) to join this group.
+            </p>
+          )}
+
           <button
             type="button"
-            disabled={state.isBusy || joinCode.trim().length < 4 || !isJoinPhoneValid}
+            disabled={state.isBusy || joinCode.trim().length < 4 || !isJoinNameValid || !isJoinPhoneValid}
             onClick={() => {
-              const resolvedName = joinDisplayName.trim() || state.currentUserName;
-              void actions.joinGroupByCode(joinCode, resolvedName, normalizedJoinPhone);
+              void actions.joinGroupByCode(
+                joinCode,
+                joinDisplayName.trim(),
+                normalizedJoinPhone
+              );
             }}
             data-testid="cloud_join_button"
             className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--rally-primary)] px-4 text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
@@ -533,9 +549,12 @@ export function CloudGroupHubScreen({
         onClose={() => setShowQrScanner(false)}
         onCodeScanned={(scannedCode) => {
           setJoinCode(scannedCode);
-          if (isJoinPhoneValid) {
-            const resolvedName = joinDisplayName.trim() || state.currentUserName;
-            void actions.joinGroupByCode(scannedCode, resolvedName, normalizedJoinPhone);
+          if (isJoinNameValid && isJoinPhoneValid) {
+            void actions.joinGroupByCode(
+              scannedCode,
+              joinDisplayName.trim(),
+              normalizedJoinPhone
+            );
           }
         }}
       />

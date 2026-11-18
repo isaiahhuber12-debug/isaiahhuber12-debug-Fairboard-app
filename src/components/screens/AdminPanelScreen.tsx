@@ -6,6 +6,7 @@ import {
   Download,
   FileSpreadsheet,
   Lock,
+  LogIn,
   Mail,
   Megaphone,
   MessageSquare,
@@ -178,6 +179,53 @@ export function AdminPanelScreen({
         </div>
         <RoleBadge role={state.currentRole} />
       </div>
+
+      {state.isGuest ? (
+        <div className="space-y-4">
+          <section
+            data-testid="admin_guest_upgrade_card"
+            className="space-y-3 rounded-3xl border border-[var(--rally-primary)]/35 bg-[var(--rally-surface)] p-5 shadow-sm"
+          >
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--rally-primary-container)] text-[var(--rally-primary)]">
+                <UserCog className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h2 className="font-display text-lg font-bold">
+                  Admin Role Assigned — Sign In with Google to Unlock Controls
+                </h2>
+                <p className="text-xs leading-relaxed text-[var(--rally-on-surface-variant)]">
+                  You have been assigned the{' '}
+                  <strong className="font-semibold text-[var(--rally-on-surface)]">
+                    {ROLE_META[state.currentRole].label}
+                  </strong>{' '}
+                  role in {group?.name ?? 'this group'}. Because you joined with a Group Code
+                  without an email, sign in with Google to verify your identity before accessing
+                  private member phone numbers, assigning roles, managing channels, or reviewing the
+                  audit log.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => actions.requestGoogleSignIn()}
+              data-testid="admin_guest_google_signin_button"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[var(--rally-primary)] px-4 text-sm font-semibold text-white transition hover:brightness-110"
+            >
+              <LogIn className="h-4 w-4" />
+              <span>Sign In with Google to Activate Admin Tools</span>
+            </button>
+          </section>
+
+          <PersonalAppearanceCard
+            appearance={state.personalAppearance}
+            isBusy={state.isBusy}
+            onUpdate={(patch) => void actions.updatePersonalAppearance(patch)}
+            onReset={() => void actions.resetPersonalAppearance()}
+          />
+        </div>
+      ) : (
+        <>
 
       {/* Admin Sub-Tab Switcher */}
       <div
@@ -537,21 +585,25 @@ export function AdminPanelScreen({
             <button
               type="button"
               disabled={state.isBusy || members.length === 0}
-              onClick={() =>
-                actions.exportMembersCsv(
-                  searchQuery.trim() || roleFilter !== null ? filteredMembers : members
-                )
-              }
+              onClick={() => actions.exportMembersCsv(members)}
               data-testid="member_roster_export_csv_button"
               className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--rally-on-surface)] transition hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
             >
               <Download className="h-3.5 w-3.5 text-[var(--rally-primary)]" />
-              <span>
-                {searchQuery.trim() || roleFilter !== null
-                  ? `Export Filtered (${filteredMembers.length})`
-                  : 'Export CSV'}
-              </span>
+              <span>Download Member Roster</span>
             </button>
+            {(searchQuery.trim() || roleFilter !== null) && filteredMembers.length > 0 && (
+              <button
+                type="button"
+                disabled={state.isBusy}
+                onClick={() => actions.exportMembersCsv(filteredMembers)}
+                data-testid="member_roster_export_filtered_csv_button"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--rally-outline)] bg-[var(--rally-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--rally-on-surface-variant)] transition hover:bg-[var(--rally-surface-variant)] disabled:opacity-45"
+              >
+                <Download className="h-3.5 w-3.5 text-[var(--rally-primary)]" />
+                <span>Export Filtered ({filteredMembers.length})</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -800,6 +852,8 @@ export function AdminPanelScreen({
       />
         </>
       )}
+        </>
+      )}
     </div>
   );
 }
@@ -832,7 +886,6 @@ function MemberPermissionRow({
     contact?.authMethod === 'CODE_GUEST' || member.uid.startsWith('guest_');
 
   const canEditRole =
-    !isGuestMember &&
     memberRole !== MemberRole.CREATOR &&
     member.uid !== viewerUid &&
     (viewerIsCreator || memberRole !== MemberRole.ADMIN);

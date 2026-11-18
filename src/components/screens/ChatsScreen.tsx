@@ -39,8 +39,8 @@ export function ChatsScreen({ state, actions }: ChatsScreenProps) {
   const [editingChannel, setEditingChannel] = useState<ChatChannel | null>(null);
   const [deletingChannel, setDeletingChannel] = useState<ChatChannel | null>(null);
 
-  const canManageChannels = ROLE_META[state.currentRole].canManageEventsAndTasks;
-  const isAdminOrCreator = ROLE_META[state.currentRole].canAccessAdminPanel;
+  const canManageChannels = !state.isGuest && ROLE_META[state.currentRole].canManageEventsAndTasks;
+  const isAdminOrCreator = !state.isGuest && ROLE_META[state.currentRole].canAccessAdminPanel;
   const smsMessagesActive = state.smsPreferences.enabled && state.smsPreferences.forMessages;
 
   return (

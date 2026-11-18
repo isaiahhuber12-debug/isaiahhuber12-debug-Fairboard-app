@@ -34,6 +34,7 @@ import {
 import {
   ApprovalStatus,
   type HubNotification,
+  MemberRole,
   NOTIFICATION_TYPE_LABELS,
   NotificationType,
   parseApprovalStatus,
@@ -79,8 +80,10 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
     [events, state.remindedTimes]
   );
 
-  const isAdminOrCreator = ROLE_META[state.currentRole].canAccessAdminPanel;
-  const canSendTargetedUpdates = ROLE_META[state.currentRole].canSendTargetedUpdates;
+  const isAdminOrCreator = !state.isGuest && ROLE_META[state.currentRole].canAccessAdminPanel;
+  const canSendTargetedUpdates =
+    !state.isGuest && ROLE_META[state.currentRole].canSendTargetedUpdates;
+  const effectiveComposerRole = state.isGuest ? MemberRole.PARTICIPANT : state.currentRole;
 
   const pendingNotifications = useMemo(
     () =>
@@ -336,7 +339,7 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
       {/* Compose Dialog */}
       <NotificationComposerDialog
         open={showComposerDialog}
-        currentRole={state.currentRole}
+        currentRole={effectiveComposerRole}
         initialNotification={null}
         prefillNotification={duplicatingNotification}
         channels={channels}
@@ -357,7 +360,7 @@ export function NotificationsScreen({ state, actions }: NotificationsScreenProps
       {/* Edit Dialog */}
       <NotificationComposerDialog
         open={editingNotification !== null}
-        currentRole={state.currentRole}
+        currentRole={effectiveComposerRole}
         initialNotification={editingNotification}
         channels={channels}
         events={events}

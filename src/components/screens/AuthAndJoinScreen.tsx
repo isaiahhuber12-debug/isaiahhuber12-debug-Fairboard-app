@@ -127,6 +127,11 @@ export function AuthAndJoinScreen({
       setLocalError('Enter a 4–24 character Group Code before joining with Google.');
       return;
     }
+    const cleanName = displayName.trim();
+    if (cleanName.length < 2) {
+      setLocalError('Please enter your full name (at least 2 characters) to join.');
+      return;
+    }
     const normalizedPhone = guestPhone.trim() ? normalizePhoneInput(guestPhone) : '';
     if (guestPhone.trim() && !E164_PHONE_REGEX.test(normalizedPhone)) {
       setLocalError('Enter a valid cell phone number (e.g. (555) 123-4567).');
@@ -139,7 +144,7 @@ export function AuthAndJoinScreen({
     try {
       await onJoinWithCodeWithGoogle(
         normalizedCode,
-        displayName.trim(),
+        cleanName,
         normalizedPhone || undefined
       );
     } finally {
@@ -339,6 +344,8 @@ export function AuthAndJoinScreen({
                 </label>
                 <input
                   type="text"
+                  required
+                  aria-required="true"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value.slice(0, 50))}
                   placeholder="e.g. Jordan Taylor"
