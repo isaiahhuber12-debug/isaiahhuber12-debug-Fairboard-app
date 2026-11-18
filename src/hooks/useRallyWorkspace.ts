@@ -2375,7 +2375,7 @@ export function useRallyWorkspace(
 
   const state: RallyWorkspaceState = {
     isCloudMode: false,
-    isGuest:
+    isGuest: false,
     currentUserId: uid,
     currentUserName,
     currentUserEmail: identity.email ?? null,
