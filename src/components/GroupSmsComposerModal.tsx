@@ -185,7 +185,58 @@ function GroupSmsComposerModalBody({
       // Ignore clipboard failure
     }
   };
+  const [sendingCloudSms, setSendingCloudSms] = useState(false);
 
+  const handleSendCloudSms = async () => {
+    if (!allRecipientPhones.length || !formattedSmsText.trim()) return;
+
+    let apiKey = window.localStorage.getItem('rallyhub_textbee_api_key') || '';
+    if (!apiKey) {
+      const entered = window.prompt('Enter your TextBee API Key (from textbee.dev):');
+      if (!entered || !entered.trim()) return;
+      apiKey = entered.trim();
+      window.localStorage.setItem('rallyhub_textbee_api_key', apiKey);
+    }
+
+    const recipients = allRecipientPhones.map((phone) => {
+      const digits = phone.replace(/\D/g, '');
+      if (digits.length === 10) return `+1${digits}`;
+      return phone.startsWith('+') ? phone : `+${digits}`;
+    });
+
+    setSendingCloudSms(true);
+    try {
+      const response = await fetch('https://textbee.dev', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          recipients,
+          message: formattedSmsText,
+        }),
+      });
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          window.localStorage.removeItem('rallyhub_textbee_api_key');
+        }
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.message || err.error || `TextBee error (${response.status})`);
+      }
+
+      onBanner?.(`Cloud SMS sent to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}!`);
+    } catch (error) {
+      onBanner?.(error instanceof Error ? error.message : 'Failed to send Cloud SMS.');
+      
+      onBanner?.(error instanceof Error ? error.message : 'Failed to send Cloud SMS.');
+    } finally {
+      setSendingCloudSms(false);
+    }
+  
+    }
+  };
   const canLaunchDeviceSms = allRecipientPhones.length > 0;
   const smsSegments = Math.max(1, Math.ceil((formattedSmsText.length || 1) / 160));
 
@@ -229,7 +280,7 @@ function GroupSmsComposerModalBody({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {canLaunchDeviceSms && deviceSmsUri ? (
+<button type="button" onClick={() => void handleSendCloudSms()} className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--rally-primary)] px-4 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">{sendingCloudSms ? 'Sending...' : `Send Cloud SMS (${allRecipientPhones.length})`}  </button>          {canLaunchDeviceSms && deviceSmsUri ? (
               <a
                 href={deviceSmsUri}
                 data-testid="sms_composer_open_messages_link"
